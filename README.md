@@ -4,27 +4,80 @@ Local durable persistence primitives for [`swift-loggers`](https://github.com/sw
 an adapter-agnostic envelope/store contract plus a planned file-backed
 implementation.
 
-SwiftPM and platform deployment metadata will land with the
-implementation PR that adds `Package.swift`. MIT licensed.
+SwiftPM manifest, platform minima, and the `LoggerPersistence` core
+target ship with this repository. MIT licensed.
 
 > **API in active design.** This pre-1.0 package is not tagged yet.
 
 ## Products
 
-The planned package shape has two products:
+The currently shipped package shape exposes one product:
 
-- `LoggerPersistence` -- protocols and data model. The
-  `PersistentLogEnvelope`, `PersistentLogStore`, and
-  `LogRecordPersistentEncoder` surface.
-- `LoggerFilePersistence` -- file-backed implementation. The planned
-  `FileLogStore` actor and `Configuration` for append-only NDJSON
-  persistence.
+- `LoggerPersistence` -- protocols and data model. The product
+  exposes `PersistentLogEnvelope`, `PersistentLogStore`, and
+  `LogRecordPersistentEncoder`. Canonical JSON / binary64 /
+  RFC 3339 millisecond encoding is implemented internally per
+  [`Docs/FileFormatSpec.md`](Docs/FileFormatSpec.md) and is not
+  part of the public surface.
+
+A second product, `LoggerFilePersistence` (file-backed `FileLogStore`
+actor and configuration), is intentionally parked for a follow-up
+PR; it is not part of the manifest in this repository today.
 
 ## Installation
 
-The package manifest is not part of this spec-only PR. SwiftPM
-installation instructions will land with the implementation PR that adds
-`Package.swift` and the source targets.
+> **Requires Swift 6 toolchain** (the package manifest is
+> `swift-tools-version: 6.0` and the public API uses typed throws).
+
+> **Pre-tag.** This repository has no released SemVer tag yet, so a
+> `from:` (or `.upToNextMinor(from:)`) requirement has nothing to
+> resolve against. Until the first tag lands, depend on the branch
+> or a specific revision.
+
+Pre-tag (current), pinned to a development branch:
+
+```swift
+.package(
+    url: "https://github.com/swift-loggers/swift-logger-persistence",
+    branch: "main"
+)
+```
+
+or pinned to a specific commit:
+
+```swift
+.package(
+    url: "https://github.com/swift-loggers/swift-logger-persistence",
+    revision: "<commit-sha>"
+)
+```
+
+After the first tag lands, switch to the released SemVer
+requirement and replace the placeholder below with the actual
+released tag (plain SemVer, no leading `v`):
+
+```swift
+// after the first release tag, replace `<first-release-version>`
+// with the actual tag (plain SemVer, no leading `v`):
+.package(
+    url: "https://github.com/swift-loggers/swift-logger-persistence",
+    from: "<first-release-version>"
+)
+```
+
+Then add the `LoggerPersistence` product to the targets that consume
+the envelope / store / encoder surface:
+
+```swift
+.product(name: "LoggerPersistence", package: "swift-logger-persistence")
+```
+
+The package depends on
+[`swift-loggers/swift-logger`](https://github.com/swift-loggers/swift-logger)
+for the `Loggers.LogRecord` shape. Platform minima follow the planned
+file-backed APIs (iOS 13.4 / tvOS 13.4 / macOS 10.15.4 / watchOS 6.2 /
+visionOS 1) so the manifest stays compatible across the milestone PR
+sequence.
 
 ## Planned usage model
 

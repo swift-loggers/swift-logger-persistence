@@ -1,0 +1,39 @@
+name: Documentation
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    name: Build DocC (${{ matrix.product }})
+    runs-on: macos-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        product: [LoggerPersistence]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tool versions
+        run: |
+          swift --version
+          xcodebuild -version
+
+      - name: Build documentation
+        run: |
+          DOCS_OUTPUT="$(mktemp -d "${RUNNER_TEMP}/docc-output.XXXXXX")"
+          swift package --allow-writing-to-directory "$DOCS_OUTPUT" \
+            generate-documentation \
+            --target ${{ matrix.product }} \
+            --disable-indexing \
+            --transform-for-static-hosting \
+            --hosting-base-path swift-logger-persistence/${{ matrix.product }} \
+            --output-path "$DOCS_OUTPUT/${{ matrix.product }}" \
+            --warnings-as-errors
