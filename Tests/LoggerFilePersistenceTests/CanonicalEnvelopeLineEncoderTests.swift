@@ -4,8 +4,7 @@ import Testing
 
 @testable import LoggerFilePersistence
 
-/// Canonical envelope-line encoder coverage for the wire format
-/// defined by `Docs/FileFormatSpec.md`.
+/// Canonical envelope-line encoder coverage.
 @Suite("CanonicalEnvelopeLineEncoder canonical wire format")
 struct CanonicalEnvelopeLineEncoderTests {
     private static let baselineId = UUID(
@@ -70,12 +69,15 @@ struct CanonicalEnvelopeLineEncoderTests {
 
     @Test("Encoder emits non-ASCII scalars as UTF-8 bytes, not `\\u` escapes")
     func nonASCIIEmittedAsUTF8Bytes() throws {
-        let envelope = try Self.makeEnvelope(hints: ["key": "café"])
+        // Keep source ASCII while exercising non-ASCII UTF-8 output.
+        let value = "caf\u{e9}"
+        let envelope = try Self.makeEnvelope(hints: ["key": value])
         let line = try Self.encodedString(envelope)
-        #expect(line.contains(##""key":"café""##))
-        // Non-ASCII scalars participate in the canonical line as raw UTF-8 bytes.
-        // The escape form `\u00e9` (six literal ASCII chars) must not appear.
-        #expect(!line.contains(##"\u00e9"##))
+        #expect(line.contains("\"key\":\"" + value + "\""))
+        // Canonical bytes must contain UTF-8, not `\u` escapes.
+        // Reject the unicode escape spelling case-insensitively so
+        // both lowercase and uppercase escape spellings are caught.
+        #expect(line.range(of: ##"\u00e9"##, options: .caseInsensitive) == nil)
     }
 
     @Test("Encoder emits id in canonical lower-case `8-4-4-4-12` form")
@@ -119,7 +121,7 @@ struct CanonicalEnvelopeLineEncoderTests {
 
     @Test("Encoder emits payload as standard base64 with padding")
     func payloadEmittedAsStandardBase64() throws {
-        // `Hello` in UTF-8 → standard base64 `SGVsbG8=`.
+        // Known base64 fixture.
         let envelope = try Self.makeEnvelope(payload: Data("Hello".utf8))
         let line = try Self.encodedString(envelope)
         #expect(line.contains(##""payload":"SGVsbG8=""##))
@@ -127,8 +129,7 @@ struct CanonicalEnvelopeLineEncoderTests {
 
     @Test("Encoder escapes the standard base64 alphabet's solidus inside the payload field")
     func payloadBase64SolidusIsEscaped() throws {
-        // Three `0xFF` bytes encode to base64 `////`; each solidus
-        // escapes to `\/` per the canonical JSON escape table.
+        // `0xFF 0xFF 0xFF` encodes to `////`; canonical JSON escapes `/`.
         let envelope = try Self.makeEnvelope(payload: Data([0xFF, 0xFF, 0xFF]))
         let line = try Self.encodedString(envelope)
         #expect(line.contains(##""payload":"\/\/\/\/""##))
@@ -154,8 +155,7 @@ struct CanonicalEnvelopeLineEncoderTests {
     func encodedLineHasSingleTrailingLF() throws {
         let envelope = try Self.makeEnvelope(hints: ["a": "b"])
         let bytes = try CanonicalEnvelopeLineEncoder().encode(envelope)
-        let lfCount = bytes.filter { $0 == 0x0A }.count
-        #expect(lfCount == 1)
         #expect(bytes.last == 0x0A)
+        #expect(!bytes.dropLast().contains(0x0A))
     }
 }

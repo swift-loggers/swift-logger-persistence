@@ -13,6 +13,10 @@ opt_in_rules:
   - closure_spacing           # Proper spacing in closures
   - force_unwrapping          # Warn on force unwrap
 
+# Analyzer rules (require compile log; run via `swiftlint analyze`)
+analyzer_rules:
+  - unused_import             # Flag unused module imports
+
 # Line length
 line_length:
   warning: 120

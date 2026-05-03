@@ -80,6 +80,15 @@ jobs:
       - name: SwiftLint strict
         run: swiftlint --strict
 
+      - name: Build (verbose) for SwiftLint analyzer
+        shell: bash
+        run: |
+          set -o pipefail
+          swift build --build-tests -v 2>&1 | tee build.log
+
+      - name: SwiftLint analyze (analyzer rules)
+        run: swiftlint analyze --compiler-log-path build.log --strict
+
       - name: Whitespace check
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then

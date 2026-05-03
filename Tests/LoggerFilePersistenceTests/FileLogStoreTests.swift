@@ -43,7 +43,10 @@ struct FileLogStoreTests {
 
     // MARK: Successful admission
 
-    @Test("First append creates the segment directory, file, and writes one canonical line")
+    @Test(
+        "First append creates the segment directory, file, and writes one canonical line",
+        .tags(.lgp21, .lgp25, .lgp26)
+    )
     func firstAppendCreatesSegmentAndWritesCanonicalLine() async throws {
         let directory = Self.uniqueDirectory()
         defer { Self.remove(directory) }
@@ -59,7 +62,10 @@ struct FileLogStoreTests {
         #expect(text == expected)
     }
 
-    @Test("Sequential appends produce one accepted line per call in caller order")
+    @Test(
+        "Sequential appends produce one accepted line per call in caller order",
+        .tags(.lgp1, .lgp11, .lgp25)
+    )
     func sequentialAppendsProduceOneLinePerCall() async throws {
         let directory = Self.uniqueDirectory()
         defer { Self.remove(directory) }
@@ -80,17 +86,22 @@ struct FileLogStoreTests {
 
     // MARK: Flush
 
-    @Test("Flush before any append is a no-op")
+    @Test(
+        "Flush before any append is a no-op",
+        .tags(.lgp5, .lgp12)
+    )
     func flushBeforeAppendIsNoOp() async throws {
         let directory = Self.uniqueDirectory()
         defer { Self.remove(directory) }
         let store = FileLogStore(configuration: .init(directory: directory))
-        // Should not throw and should not create the segment file.
         try await store.flush()
         #expect(!FileManager.default.fileExists(atPath: Self.segmentURL(in: directory).path))
     }
 
-    @Test("Flush after append synchronizes without changing accepted bytes")
+    @Test(
+        "Flush after append synchronizes without changing accepted bytes",
+        .tags(.lgp5, .lgp12, .lgp27)
+    )
     func flushAfterAppendSynchronizes() async throws {
         let directory = Self.uniqueDirectory()
         defer { Self.remove(directory) }
@@ -104,7 +115,10 @@ struct FileLogStoreTests {
 
     // MARK: Pre-admission validation
 
-    @Test("Oversized encoded line is rejected with `.encodedEnvelopeLineTooLarge` before storage mutation")
+    @Test(
+        "Oversized encoded line is rejected with `.encodedEnvelopeLineTooLarge` before storage mutation",
+        .tags(.lgp13, .lgp22, .lgp24, .lgp38)
+    )
     func oversizedEncodedLineIsRejected() async throws {
         let directory = Self.uniqueDirectory()
         defer { Self.remove(directory) }
@@ -118,12 +132,13 @@ struct FileLogStoreTests {
         await #expect(throws: FileLogStoreError.self) {
             try await store.append(envelope)
         }
-        // Rejected envelopes do not extend the recoverable prefix; the
-        // segment file must still not exist (no append succeeded).
         #expect(!FileManager.default.fileExists(atPath: Self.segmentURL(in: directory).path))
     }
 
-    @Test("Oversized encoded line surfaces the spec's typed validation error")
+    @Test(
+        "Oversized encoded line surfaces the spec's typed validation error",
+        .tags(.lgp2, .lgp22, .lgp38)
+    )
     func oversizedEncodedLineSurfacesTypedValidationError() async throws {
         let directory = Self.uniqueDirectory()
         defer { Self.remove(directory) }
@@ -146,7 +161,10 @@ struct FileLogStoreTests {
 
     // MARK: Concurrency and serialization
 
-    @Test("Concurrent appends serialize through the actor and admit every envelope")
+    @Test(
+        "Concurrent appends serialize through the actor and admit every envelope",
+        .tags(.lgp1, .lgp11)
+    )
     func concurrentAppendsSerializeThroughActor() async throws {
         let directory = Self.uniqueDirectory()
         defer { Self.remove(directory) }
@@ -165,11 +183,9 @@ struct FileLogStoreTests {
         let text = try #require(String(data: bytes, encoding: .utf8))
         let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
         #expect(lines.count == count)
-        // Each envelope's sequence appears exactly once; admission
-        // order is the actor's serialization order, not caller
-        // invocation order. Extract the sequence numerically from
-        // each line so substring overlap (e.g. `:1` matching `:10`)
-        // cannot mask a missed admission.
+        // Extract the sequence numerically from each line so
+        // substring overlap (e.g. `:1` matching `:10`) cannot mask
+        // a missed admission.
         var observed: Set<Int> = []
         for line in lines {
             let lineData = try #require(String(line).data(using: .utf8))
@@ -184,7 +200,10 @@ struct FileLogStoreTests {
 
     // MARK: Persistence across stores
 
-    @Test("Reopening a store appends to the existing segment file rather than truncating it")
+    @Test(
+        "Reopening a store appends to the existing segment file rather than truncating it",
+        .tags(.lgp11, .lgp25, .lgp27)
+    )
     func reopeningStoreAppendsToExistingSegment() async throws {
         let directory = Self.uniqueDirectory()
         defer { Self.remove(directory) }
@@ -208,7 +227,10 @@ struct FileLogStoreTests {
 
     // MARK: Trailing-suffix trimming on reopen
 
-    @Test("Reopening a segment with a trailing partial suffix discards the suffix before append")
+    @Test(
+        "Reopening a segment with a trailing partial suffix discards the suffix before append",
+        .tags(.lgp14, .lgp15, .lgp24, .lgp25)
+    )
     func reopenWithPartialSuffixDiscardsSuffix() async throws {
         let directory = Self.uniqueDirectory()
         defer { Self.remove(directory) }
@@ -223,8 +245,6 @@ struct FileLogStoreTests {
         let acceptedBytes = try Data(contentsOf: segmentURL)
         let partial = Data("partial-suffix-no-LF".utf8)
         try (acceptedBytes + partial).write(to: segmentURL)
-        // Reopen and append; the partial suffix must not survive into
-        // a physical LF-terminated line.
         let reopened = FileLogStore(configuration: .init(directory: directory))
         try await reopened.append(try Self.makeEnvelope(sequence: 2))
         try await reopened.flush()
@@ -237,7 +257,10 @@ struct FileLogStoreTests {
         #expect(lines[1].contains(##""sequence":2"##))
     }
 
-    @Test("Reopening a segment ending exactly at LF preserves every accepted line")
+    @Test(
+        "Reopening a segment ending exactly at LF preserves every accepted line",
+        .tags(.lgp11, .lgp14, .lgp25, .lgp27)
+    )
     func reopenWithCleanTailPreservesAcceptedLines() async throws {
         let directory = Self.uniqueDirectory()
         defer { Self.remove(directory) }
@@ -261,7 +284,10 @@ struct FileLogStoreTests {
 
     // MARK: Encoded-line shape invariant (P2)
 
-    @Test("Missing trailing LF surfaces as `.encodedEnvelopeMissingTrailingLF`")
+    @Test(
+        "Missing trailing LF surfaces as `.encodedEnvelopeMissingTrailingLF`",
+        .tags(.lgp21, .lgp25, .lgp26)
+    )
     func missingTrailingLFSurfacesAsInvariantViolation() throws {
         let bytes = Data(##"{"id":"x"}"##.utf8) // no LF
         do {
@@ -274,9 +300,13 @@ struct FileLogStoreTests {
         }
     }
 
-    @Test("Interior LF surfaces as `.encodedEnvelopeContainsInteriorLF`")
+    @Test(
+        "Interior LF surfaces as `.encodedEnvelopeContainsInteriorLF`",
+        .tags(.lgp21, .lgp25, .lgp26)
+    )
     func interiorLFSurfacesAsInvariantViolation() throws {
-        let bytes = Data("{\"id\":\"a\"}\n{\"id\":\"b\"}\n".utf8) // two lines glued
+        // Two LF-terminated objects in one append unit.
+        let bytes = Data("{\"id\":\"a\"}\n{\"id\":\"b\"}\n".utf8)
         do {
             try FileLogStore.validateNoInteriorLF(bytes)
             Issue.record("expected .encodedEnvelopeContainsInteriorLF")
@@ -287,7 +317,10 @@ struct FileLogStoreTests {
         }
     }
 
-    @Test("Well-formed single-line bytes pass both shape invariants")
+    @Test(
+        "Well-formed single-line bytes pass both shape invariants",
+        .tags(.lgp21, .lgp25, .lgp26)
+    )
     func wellFormedShapePassesInvariants() throws {
         let bytes = Data(##"{"id":"x"}"##.utf8) + Data([0x0A])
         try FileLogStore.validateTrailingLF(bytes)

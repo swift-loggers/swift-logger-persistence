@@ -1,5 +1,3 @@
-import Foundation
-
 /// A durable store that accepts ``PersistentLogEnvelope`` values and
 /// persists them.
 ///
