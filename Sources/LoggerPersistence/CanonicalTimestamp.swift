@@ -5,20 +5,23 @@ import Foundation
 ///
 /// Defined by `Docs/FileFormatSpec.md` ("Timestamp Field"). This
 /// type centralizes validation and rendering so the timestamp
-/// profile stays consistent.
-enum CanonicalTimestamp {
+/// profile stays consistent across the package's wire-format
+/// surfaces. Exposed via the `WireFormat` SPI so the file-backed
+/// store can emit byte-identical timestamps without duplicating
+/// the canonical profile.
+@_spi(WireFormat) public enum CanonicalTimestamp {
     /// Decomposed Gregorian + UTC components of a renderable
     /// canonical RFC 3339 UTC millisecond timestamp. `millisecond`
     /// is in `0...999`, including for pre-reference
     /// (negative-interval) dates.
-    struct Components: Sendable, Equatable {
-        let year: Int
-        let month: Int
-        let day: Int
-        let hour: Int
-        let minute: Int
-        let second: Int
-        let millisecond: Int
+    @_spi(WireFormat) public struct Components: Sendable, Equatable {
+        @_spi(WireFormat) public let year: Int
+        @_spi(WireFormat) public let month: Int
+        @_spi(WireFormat) public let day: Int
+        @_spi(WireFormat) public let hour: Int
+        @_spi(WireFormat) public let minute: Int
+        @_spi(WireFormat) public let second: Int
+        @_spi(WireFormat) public let millisecond: Int
     }
 
     /// Validates `date` against the canonical profile and returns
@@ -34,7 +37,7 @@ enum CanonicalTimestamp {
     /// - the rendered year is in `1...9999`.
     ///
     /// Returns `nil` for any date that fails one of these checks.
-    static func components(of date: Date) -> Components? {
+    @_spi(WireFormat) public static func components(of date: Date) -> Components? {
         let interval = date.timeIntervalSinceReferenceDate
         guard interval.isFinite else { return nil }
         let candidateMillisDouble = (interval * 1000).rounded(.toNearestOrAwayFromZero)
@@ -78,5 +81,62 @@ enum CanonicalTimestamp {
             second: second,
             millisecond: millisecond
         )
+    }
+
+    /// Returns the canonical RFC 3339 UTC millisecond rendering of
+    /// `date`, or `nil` if the date is outside the canonical
+    /// profile.
+    ///
+    /// The rendering shape is exactly
+    /// `YYYY-MM-DDTHH:MM:SS.mmmZ` (POSIX locale, Gregorian
+    /// calendar, fixed millisecond fractional precision, literal
+    /// `Z`). Bytes participate in replay identity and are emitted
+    /// independently of any Foundation formatter.
+    @_spi(WireFormat) public static func canonicalString(from date: Date) -> String? {
+        guard let parts = components(of: date) else { return nil }
+        var output = ""
+        output.reserveCapacity(24)
+        appendZeroPadded(parts.year, width: 4, into: &output)
+        output.append("-")
+        appendZeroPadded(parts.month, width: 2, into: &output)
+        output.append("-")
+        appendZeroPadded(parts.day, width: 2, into: &output)
+        output.append("T")
+        appendZeroPadded(parts.hour, width: 2, into: &output)
+        output.append(":")
+        appendZeroPadded(parts.minute, width: 2, into: &output)
+        output.append(":")
+        appendZeroPadded(parts.second, width: 2, into: &output)
+        output.append(".")
+        appendZeroPadded(parts.millisecond, width: 3, into: &output)
+        output.append("Z")
+        return output
+    }
+
+    private static let asciiDigit: [Unicode.Scalar] = [
+        "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"
+    ]
+
+    /// Appends `value` as a zero-padded fixed-width decimal ASCII
+    /// sequence. Inputs are non-negative because every component
+    /// returned by ``components(of:)`` is non-negative.
+    private static func appendZeroPadded(
+        _ value: Int,
+        width: Int,
+        into output: inout String
+    ) {
+        var scalars: [Unicode.Scalar] = []
+        scalars.reserveCapacity(width)
+        var remaining = value
+        repeat {
+            scalars.append(asciiDigit[remaining % 10])
+            remaining /= 10
+        } while remaining > 0
+        while scalars.count < width {
+            scalars.append(asciiDigit[0])
+        }
+        for scalar in scalars.reversed() {
+            output.unicodeScalars.append(scalar)
+        }
     }
 }

@@ -14,6 +14,10 @@ let package = Package(
         .library(
             name: "LoggerPersistence",
             targets: ["LoggerPersistence"]
+        ),
+        .library(
+            name: "LoggerFilePersistence",
+            targets: ["LoggerFilePersistence"]
         )
     ],
     dependencies: [
@@ -35,9 +39,23 @@ let package = Package(
                 .product(name: "Loggers", package: "swift-logger")
             ]
         ),
+        .target(
+            name: "LoggerFilePersistence",
+            dependencies: [
+                "LoggerPersistence"
+            ]
+        ),
         .testTarget(
             name: "LoggerPersistenceTests",
             dependencies: [
+                "LoggerPersistence",
+                .product(name: "Loggers", package: "swift-logger")
+            ]
+        ),
+        .testTarget(
+            name: "LoggerFilePersistenceTests",
+            dependencies: [
+                "LoggerFilePersistence",
                 "LoggerPersistence",
                 .product(name: "Loggers", package: "swift-logger")
             ]

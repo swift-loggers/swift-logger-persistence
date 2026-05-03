@@ -331,19 +331,11 @@ struct CanonicalRedactedRecordEncoder {
         _ date: Date,
         into output: inout String
     ) throws(LogRecordPersistentEncoderError) {
-        guard let components = CanonicalTimestamp.components(of: date) else {
+        guard let canonical = CanonicalTimestamp.canonicalString(from: date) else {
             throw .nonRepresentableDate
         }
-        let formatted = String(
-            format: "\"%04d-%02d-%02dT%02d:%02d:%02d.%03dZ\"",
-            components.year,
-            components.month,
-            components.day,
-            components.hour,
-            components.minute,
-            components.second,
-            components.millisecond
-        )
-        output.append(formatted)
+        output.append("\"")
+        output.append(canonical)
+        output.append("\"")
     }
 }
