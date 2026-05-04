@@ -143,4 +143,34 @@ public struct FileSystemErrorContext: Sendable, Equatable {
         code = nsError.code
         description = nsError.localizedDescription
     }
+
+    /// Domain for synthesized package errors.
+    internal static let packageDomain = "LoggerFilePersistence"
+}
+
+extension FileLogStoreError {
+    /// Maps an internal read-side failure to the public store error.
+    internal init(
+        projecting error: InternalReadError,
+        onto operation: FileLogStoreOperation
+    ) {
+        switch error {
+        case let .operationFailed(_, url, context):
+            self = .operationFailed(
+                operation: operation,
+                url: url,
+                context: context
+            )
+        case let .interiorCorruption(segmentURL, _, _):
+            self = .operationFailed(
+                operation: operation,
+                url: segmentURL,
+                context: FileSystemErrorContext(
+                    domain: FileSystemErrorContext.packageDomain,
+                    code: nil,
+                    description: "interiorCorruption"
+                )
+            )
+        }
+    }
 }

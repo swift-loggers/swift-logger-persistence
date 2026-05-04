@@ -45,10 +45,15 @@ let package = Package(
                 "LoggerPersistence"
             ]
         ),
+        .target(
+            name: "LoggerPersistenceTestSupport",
+            path: "Tests/LoggerPersistenceTestSupport"
+        ),
         .testTarget(
             name: "LoggerPersistenceTests",
             dependencies: [
                 "LoggerPersistence",
+                "LoggerPersistenceTestSupport",
                 .product(name: "Loggers", package: "swift-logger")
             ]
         ),
@@ -57,7 +62,15 @@ let package = Package(
             dependencies: [
                 "LoggerFilePersistence",
                 "LoggerPersistence",
+                "LoggerPersistenceTestSupport",
                 .product(name: "Loggers", package: "swift-logger")
+            ],
+            exclude: [
+                "CoverageMap.md",
+                "RecoveryDiscoverySQECoverage.md"
+            ],
+            resources: [
+                .copy("Fixtures")
             ]
         )
     ]

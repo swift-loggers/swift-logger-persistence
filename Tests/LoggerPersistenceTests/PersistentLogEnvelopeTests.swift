@@ -1,5 +1,6 @@
 import Foundation
 import LoggerPersistence
+import LoggerPersistenceTestSupport
 import Testing
 
 @Suite("PersistentLogEnvelope")
@@ -96,10 +97,15 @@ struct PersistentLogEnvelopeTests {
         #expect(envelope.hints == ["a": "1", "b": "2"])
         #expect(envelope.payload == payload)
     }
+}
 
+extension PersistentLogEnvelopeTests {
     // MARK: Negative construction
 
-    @Test("Public construction rejects sequence 0 with invalidSequence")
+    @Test(
+        "Public construction rejects sequence 0 with invalidSequence",
+        .tags(.lgp2, .lgp38)
+    )
     func zeroSequenceIsRejected() {
         #expect(throws: PersistentLogEnvelopeValidationError.invalidSequence) {
             try Self.makeEnvelope(sequence: 0)
@@ -129,7 +135,10 @@ struct PersistentLogEnvelopeTests {
         }
     }
 
-    @Test("Public construction accepts ms-aligned createdAt at year 9999 (high-magnitude)")
+    @Test(
+        "Public construction accepts ms-aligned createdAt at year 9999 (high-magnitude)",
+        .tags(.lgp21)
+    )
     func millisecondAlignedYear9999CreatedAtAccepted() throws {
         guard let timestamp = Year9999DateFixture.lastSecond(millisecond: 123) else {
             Issue.record("could not construct year-9999 ms-aligned timestamp")
@@ -139,7 +148,10 @@ struct PersistentLogEnvelopeTests {
         #expect(envelope.createdAt == timestamp)
     }
 
-    @Test("Public construction rejects sub-ms createdAt at year 9999 (high-magnitude)")
+    @Test(
+        "Public construction rejects sub-ms createdAt at year 9999 (high-magnitude)",
+        .tags(.lgp2, .lgp38)
+    )
     func subMillisecondYear9999CreatedAtRejected() {
         // Year-9999 sub-millisecond values must fail closed instead
         // of being rounded into canonical millisecond bytes.
@@ -215,7 +227,10 @@ struct PersistentLogEnvelopeTests {
         #expect(envelope.contentType == value)
     }
 
-    @Test("Public construction rejects more than 16 hint entries with tooManyHints")
+    @Test(
+        "Public construction rejects more than 16 hint entries with tooManyHints",
+        .tags(.lgp2, .lgp22, .lgp38)
+    )
     func tooManyHintsIsRejected() {
         var hints: [String: String] = [:]
         for index in 0 ..< 17 {
@@ -243,7 +258,10 @@ struct PersistentLogEnvelopeTests {
         }
     }
 
-    @Test("Public construction rejects too-long hint value with hintValueTooLong")
+    @Test(
+        "Public construction rejects too-long hint value with hintValueTooLong",
+        .tags(.lgp2, .lgp22, .lgp38)
+    )
     func tooLongHintValueIsRejected() {
         let oversize = String(repeating: "a", count: 513)
         #expect(
@@ -257,7 +275,10 @@ struct PersistentLogEnvelopeTests {
         }
     }
 
-    @Test("Public construction rejects hint value control characters")
+    @Test(
+        "Public construction rejects hint value control characters",
+        .tags(.lgp2, .lgp38)
+    )
     func hintValueControlCharacterIsRejected() {
         // 0x01 inside the value -- ASCII control (Start of Heading).
         #expect(
@@ -277,7 +298,10 @@ struct PersistentLogEnvelopeTests {
         }
     }
 
-    @Test("Public construction rejects raw payload over 1 MiB with rawPayloadTooLarge")
+    @Test(
+        "Public construction rejects raw payload over 1 MiB with rawPayloadTooLarge",
+        .tags(.lgp2, .lgp22, .lgp38)
+    )
     func payloadOverLimitIsRejected() {
         let oversize = Data(count: 1_048_577)
         #expect(
@@ -290,7 +314,10 @@ struct PersistentLogEnvelopeTests {
         }
     }
 
-    @Test("Public construction reports the lexicographically first failing hint key")
+    @Test(
+        "Public construction reports the lexicographically first failing hint key",
+        .tags(.lgp38)
+    )
     func hintKeyValidationUsesLexFirstAcrossAllKeys() {
         // Validation reports the first invalid key in UTF-8 byte order.
         #expect(
@@ -300,7 +327,10 @@ struct PersistentLogEnvelopeTests {
         }
     }
 
-    @Test("Public construction reports the lexicographically first too-long hint value key")
+    @Test(
+        "Public construction reports the lexicographically first too-long hint value key",
+        .tags(.lgp38)
+    )
     func hintValueLengthValidationUsesLexFirstAcrossAllKeys() {
         // Validation reports the first failing key in UTF-8 byte
         // order, independent of `Dictionary` iteration order.
@@ -320,7 +350,10 @@ struct PersistentLogEnvelopeTests {
         }
     }
 
-    @Test("Public construction reports the lexicographically first hint value control-char key")
+    @Test(
+        "Public construction reports the lexicographically first hint value control-char key",
+        .tags(.lgp38)
+    )
     func hintValueControlCharacterValidationUsesLexFirstAcrossAllKeys() {
         // Validation reports the first failing key in UTF-8 byte
         // order, independent of `Dictionary` iteration order.

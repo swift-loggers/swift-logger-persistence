@@ -1,5 +1,6 @@
 import Foundation
 import LoggerPersistence
+import LoggerPersistenceTestSupport
 import Testing
 
 @testable import LoggerFilePersistence

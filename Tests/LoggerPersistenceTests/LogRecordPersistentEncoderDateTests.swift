@@ -1,4 +1,5 @@
 import Foundation
+import LoggerPersistenceTestSupport
 import Loggers
 import Testing
 
@@ -26,7 +27,10 @@ struct LogRecordPersistentEncoderDateTests {
 
     // MARK: Date representability
 
-    @Test("Encoder rejects records whose timestamp is non-representable")
+    @Test(
+        "Encoder rejects records whose timestamp is non-representable",
+        .tags(.lgp2, .lgp38)
+    )
     func nonRepresentableTimestampIsRejected() throws {
         // Non-finite timestamps must fail closed instead of producing
         // canonical RFC 3339 bytes.
@@ -37,7 +41,10 @@ struct LogRecordPersistentEncoderDateTests {
         }
     }
 
-    @Test("Encoder rejects LogValue.date attributes that are non-representable")
+    @Test(
+        "Encoder rejects LogValue.date attributes that are non-representable",
+        .tags(.lgp2, .lgp38)
+    )
     func nonRepresentableLogValueDateIsRejected() throws {
         // Non-finite `LogValue.date` attributes follow the same
         // representability contract as `record.timestamp`.
@@ -50,7 +57,10 @@ struct LogRecordPersistentEncoderDateTests {
         }
     }
 
-    @Test("Encoder rejects record.timestamp with year above the RFC 3339 four-digit range")
+    @Test(
+        "Encoder rejects record.timestamp with year above the RFC 3339 four-digit range",
+        .tags(.lgp2, .lgp38)
+    )
     func recordTimestampYearOverflowIsRejected() throws {
         // Dates outside RFC 3339 four-digit AD years must fail before rendering.
         let encoder = LogRecordPersistentEncoder()
@@ -61,7 +71,10 @@ struct LogRecordPersistentEncoderDateTests {
         }
     }
 
-    @Test("Encoder rejects record.timestamp with year before the RFC 3339 four-digit range")
+    @Test(
+        "Encoder rejects record.timestamp with year before the RFC 3339 four-digit range",
+        .tags(.lgp2, .lgp38)
+    )
     func recordTimestampYearUnderflowIsRejected() throws {
         // BCE dates are outside the canonical RFC 3339 AD year range.
         let encoder = LogRecordPersistentEncoder()
@@ -72,7 +85,10 @@ struct LogRecordPersistentEncoderDateTests {
         }
     }
 
-    @Test("Encoder rejects LogValue.date attributes with year outside the RFC 3339 range")
+    @Test(
+        "Encoder rejects LogValue.date attributes with year outside the RFC 3339 range",
+        .tags(.lgp2, .lgp38)
+    )
     func logValueDateYearOutOfRangeIsRejected() throws {
         let encoder = LogRecordPersistentEncoder()
         let record = Self.makeRecord(
@@ -88,7 +104,10 @@ struct LogRecordPersistentEncoderDateTests {
         }
     }
 
-    @Test("Encoder rejects sub-millisecond record.timestamp with nonRepresentableDate")
+    @Test(
+        "Encoder rejects sub-millisecond record.timestamp with nonRepresentableDate",
+        .tags(.lgp2, .lgp38)
+    )
     func subMillisecondTimestampIsRejected() throws {
         // The canonical RFC 3339 millisecond profile rejects
         // non-millisecond-aligned values instead of truncating them
@@ -102,7 +121,10 @@ struct LogRecordPersistentEncoderDateTests {
         }
     }
 
-    @Test("Encoder rejects single-microsecond sub-ms record.timestamp")
+    @Test(
+        "Encoder rejects single-microsecond sub-ms record.timestamp",
+        .tags(.lgp2, .lgp38)
+    )
     func singleMicrosecondSubMillisecondTimestampIsRejected() throws {
         // Regression coverage for values close to the millisecond
         // boundary; non-millisecond-aligned timestamps must fail closed.
@@ -115,7 +137,10 @@ struct LogRecordPersistentEncoderDateTests {
         }
     }
 
-    @Test("Encoder rejects sub-millisecond LogValue.date attributes with nonRepresentableDate")
+    @Test(
+        "Encoder rejects sub-millisecond LogValue.date attributes with nonRepresentableDate",
+        .tags(.lgp2, .lgp38)
+    )
     func subMillisecondLogValueDateIsRejected() throws {
         // `LogValue.date` attributes follow the same canonical
         // millisecond-alignment rules as `record.timestamp`.
@@ -134,7 +159,10 @@ struct LogRecordPersistentEncoderDateTests {
         }
     }
 
-    @Test("Encoder rejects pre-epoch sub-millisecond record.timestamp with nonRepresentableDate")
+    @Test(
+        "Encoder rejects pre-epoch sub-millisecond record.timestamp with nonRepresentableDate",
+        .tags(.lgp2, .lgp38)
+    )
     func preEpochSubMillisecondTimestampIsRejected() throws {
         // Negative intervals follow the same millisecond-alignment rejection path.
         let encoder = LogRecordPersistentEncoder()
@@ -146,7 +174,10 @@ struct LogRecordPersistentEncoderDateTests {
         }
     }
 
-    @Test("Encoder emits canonical millisecond timestamp for ms-aligned record.timestamp")
+    @Test(
+        "Encoder emits canonical millisecond timestamp for ms-aligned record.timestamp",
+        .tags(.lgp21)
+    )
     func canonicalMillisecondTimestampEmitted() throws {
         // Millisecond-aligned timestamps preserve their canonical
         // RFC 3339 rendering exactly.
@@ -159,7 +190,10 @@ struct LogRecordPersistentEncoderDateTests {
         #expect(payload.contains(#""timestamp":"2023-11-14T22:13:20.123Z""#))
     }
 
-    @Test("Encoder rejects sub-ms record.timestamp at year 9999 with nonRepresentableDate")
+    @Test(
+        "Encoder rejects sub-ms record.timestamp at year 9999 with nonRepresentableDate",
+        .tags(.lgp2, .lgp38)
+    )
     func year9999SubMillisecondTimestampRejected() throws {
         // Year-9999 sub-millisecond values must fail closed instead
         // of being rounded into canonical millisecond bytes.
@@ -177,7 +211,10 @@ struct LogRecordPersistentEncoderDateTests {
         }
     }
 
-    @Test("Encoder emits canonical ms timestamp for ms-aligned record.timestamp at year 9999")
+    @Test(
+        "Encoder emits canonical ms timestamp for ms-aligned record.timestamp at year 9999",
+        .tags(.lgp21)
+    )
     func year9999MillisecondAlignedTimestampEmitted() throws {
         // Millisecond-aligned year-9999 timestamps remain representable.
         guard let timestamp = Year9999DateFixture.lastSecond(millisecond: 123) else {
@@ -191,7 +228,10 @@ struct LogRecordPersistentEncoderDateTests {
         #expect(payload.contains(#""timestamp":"9999-12-31T23:59:59.123Z""#))
     }
 
-    @Test("Encoder rejects LogValue.date attributes with infinite time interval")
+    @Test(
+        "Encoder rejects LogValue.date attributes with infinite time interval",
+        .tags(.lgp2, .lgp38)
+    )
     func infiniteLogValueDateIsRejected() throws {
         let encoder = LogRecordPersistentEncoder()
         let record = Self.makeRecord(
@@ -204,7 +244,10 @@ struct LogRecordPersistentEncoderDateTests {
 
     // MARK: Envelope validation propagation
 
-    @Test("Encoder propagates envelope validation failures via .invalidEnvelope")
+    @Test(
+        "Encoder propagates envelope validation failures via .invalidEnvelope",
+        .tags(.lgp2, .lgp38)
+    )
     func encoderPropagatesEnvelopeValidationError() throws {
         // Envelope validation failures propagate through the encoder's
         // typed error surface unchanged.

@@ -1,5 +1,6 @@
 import Foundation
 import LoggerPersistence
+import LoggerPersistenceTestSupport
 import Testing
 
 @testable import LoggerFilePersistence
@@ -33,7 +34,10 @@ struct CanonicalEnvelopeLineEncoderTests {
         return try #require(String(data: bytes, encoding: .utf8))
     }
 
-    @Test("Encoder emits canonical top-level keys in UTF-8 byte order with LF terminator")
+    @Test(
+        "Encoder emits canonical top-level keys in UTF-8 byte order with LF terminator",
+        .tags(.lgp21, .lgp26)
+    )
     func canonicalTopLevelKeyOrderAndLineTerminator() throws {
         let envelope = try Self.makeEnvelope(
             hints: ["level": "info", "domain": "auth"]
@@ -47,14 +51,20 @@ struct CanonicalEnvelopeLineEncoderTests {
         #expect(line == expected)
     }
 
-    @Test("Encoder escapes solidus inside string values as `\\/`")
+    @Test(
+        "Encoder escapes solidus inside string values as `\\/`",
+        .tags(.lgp21)
+    )
     func solidusEscapingInsideStringValues() throws {
         let envelope = try Self.makeEnvelope(contentType: "application/json")
         let line = try Self.encodedString(envelope)
         #expect(line.contains(##""contentType":"application\/json""##))
     }
 
-    @Test("Encoder escapes the canonical solidus, backslash, and quote in hint values")
+    @Test(
+        "Encoder escapes the canonical solidus, backslash, and quote in hint values",
+        .tags(.lgp21)
+    )
     func canonicalEscapeTableForHintValues() throws {
         let envelope = try Self.makeEnvelope(hints: [
             "slash": "a/b",
@@ -67,7 +77,10 @@ struct CanonicalEnvelopeLineEncoderTests {
         #expect(line.contains(##""quote":"a\"b""##))
     }
 
-    @Test("Encoder emits non-ASCII scalars as UTF-8 bytes, not `\\u` escapes")
+    @Test(
+        "Encoder emits non-ASCII scalars as UTF-8 bytes, not `\\u` escapes",
+        .tags(.lgp21)
+    )
     func nonASCIIEmittedAsUTF8Bytes() throws {
         // Keep source ASCII while exercising non-ASCII UTF-8 output.
         let value = "caf\u{e9}"
@@ -80,7 +93,10 @@ struct CanonicalEnvelopeLineEncoderTests {
         #expect(line.range(of: ##"\u00e9"##, options: .caseInsensitive) == nil)
     }
 
-    @Test("Encoder emits id in canonical lower-case `8-4-4-4-12` form")
+    @Test(
+        "Encoder emits id in canonical lower-case `8-4-4-4-12` form",
+        .tags(.lgp21)
+    )
     func uuidEmittedInCanonicalLowerCaseForm() throws {
         let mixedCaseInputId = UUID(
             uuid: (
@@ -103,14 +119,20 @@ struct CanonicalEnvelopeLineEncoderTests {
         #expect(line.contains(##""id":"abcdef01-2345-6789-9abc-def012345678""##))
     }
 
-    @Test("Encoder emits empty hints object as `{}`")
+    @Test(
+        "Encoder emits empty hints object as `{}`",
+        .tags(.lgp21)
+    )
     func emptyHintsObjectShape() throws {
         let envelope = try Self.makeEnvelope(hints: [:])
         let line = try Self.encodedString(envelope)
         #expect(line.contains(##""hints":{}"##))
     }
 
-    @Test("Encoder sorts hint keys by UTF-8 byte order, not insertion order")
+    @Test(
+        "Encoder sorts hint keys by UTF-8 byte order, not insertion order",
+        .tags(.lgp21)
+    )
     func hintKeysSortedByUTF8ByteOrder() throws {
         let envelope = try Self.makeEnvelope(
             hints: ["zeta": "z", "alpha": "a", "middle": "m"]
@@ -119,7 +141,10 @@ struct CanonicalEnvelopeLineEncoderTests {
         #expect(line.contains(##""hints":{"alpha":"a","middle":"m","zeta":"z"}"##))
     }
 
-    @Test("Encoder emits payload as standard base64 with padding")
+    @Test(
+        "Encoder emits payload as standard base64 with padding",
+        .tags(.lgp21)
+    )
     func payloadEmittedAsStandardBase64() throws {
         // Known base64 fixture.
         let envelope = try Self.makeEnvelope(payload: Data("Hello".utf8))
@@ -127,7 +152,10 @@ struct CanonicalEnvelopeLineEncoderTests {
         #expect(line.contains(##""payload":"SGVsbG8=""##))
     }
 
-    @Test("Encoder escapes the standard base64 alphabet's solidus inside the payload field")
+    @Test(
+        "Encoder escapes the standard base64 alphabet's solidus inside the payload field",
+        .tags(.lgp21)
+    )
     func payloadBase64SolidusIsEscaped() throws {
         // `0xFF 0xFF 0xFF` encodes to `////`; canonical JSON escapes `/`.
         let envelope = try Self.makeEnvelope(payload: Data([0xFF, 0xFF, 0xFF]))
@@ -135,14 +163,20 @@ struct CanonicalEnvelopeLineEncoderTests {
         #expect(line.contains(##""payload":"\/\/\/\/""##))
     }
 
-    @Test("Encoder emits sequence as a JSON number, not a string")
+    @Test(
+        "Encoder emits sequence as a JSON number, not a string",
+        .tags(.lgp21)
+    )
     func sequenceEmittedAsJSONNumber() throws {
         let envelope = try Self.makeEnvelope(sequence: 42)
         let line = try Self.encodedString(envelope)
         #expect(line.contains(##""sequence":42"##))
     }
 
-    @Test("Encoder emits createdAt with fixed millisecond fractional precision")
+    @Test(
+        "Encoder emits createdAt with fixed millisecond fractional precision",
+        .tags(.lgp21)
+    )
     func createdAtRendersWithFixedMillisecondPrecision() throws {
         let envelope = try Self.makeEnvelope(
             timestamp: Date(timeIntervalSince1970: 1_700_000_000.123)
@@ -151,7 +185,10 @@ struct CanonicalEnvelopeLineEncoderTests {
         #expect(line.contains(##""createdAt":"2023-11-14T22:13:20.123Z""##))
     }
 
-    @Test("Encoder produces only one LF in the encoded line, at the very end")
+    @Test(
+        "Encoder produces only one LF in the encoded line, at the very end",
+        .tags(.lgp21, .lgp26)
+    )
     func encodedLineHasSingleTrailingLF() throws {
         let envelope = try Self.makeEnvelope(hints: ["a": "b"])
         let bytes = try CanonicalEnvelopeLineEncoder().encode(envelope)

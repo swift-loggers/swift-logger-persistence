@@ -1,4 +1,5 @@
 import Foundation
+import LoggerPersistenceTestSupport
 import Loggers
 import Testing
 
@@ -46,31 +47,46 @@ struct CanonicalBinary64ProductionPathTests {
 
     // MARK: Boundary constants
 
-    @Test("Greatest finite magnitude renders to canonical 17-digit scientific form")
+    @Test(
+        "Greatest finite magnitude renders to canonical 17-digit scientific form",
+        .tags(.lgp21)
+    )
     func greatestFiniteMagnitudeCanonicalBytes() throws {
         let actual = try Self.encodedPayload(value: Double.greatestFiniteMagnitude)
         #expect(actual == Self.expectedEnvelope(valueToken: "1.7976931348623157e308"))
     }
 
-    @Test("Negated greatest finite magnitude carries the canonical leading minus")
+    @Test(
+        "Negated greatest finite magnitude carries the canonical leading minus",
+        .tags(.lgp21)
+    )
     func negatedGreatestFiniteMagnitudeCanonicalBytes() throws {
         let actual = try Self.encodedPayload(value: -Double.greatestFiniteMagnitude)
         #expect(actual == Self.expectedEnvelope(valueToken: "-1.7976931348623157e308"))
     }
 
-    @Test("Least normal magnitude renders to canonical 17-digit scientific form")
+    @Test(
+        "Least normal magnitude renders to canonical 17-digit scientific form",
+        .tags(.lgp21)
+    )
     func leastNormalMagnitudeCanonicalBytes() throws {
         let actual = try Self.encodedPayload(value: Double.leastNormalMagnitude)
         #expect(actual == Self.expectedEnvelope(valueToken: "2.2250738585072014e-308"))
     }
 
-    @Test("Least nonzero (smallest subnormal) magnitude renders as `5e-324`")
+    @Test(
+        "Least nonzero (smallest subnormal) magnitude renders as `5e-324`",
+        .tags(.lgp21)
+    )
     func leastNonzeroMagnitudeCanonicalBytes() throws {
         let actual = try Self.encodedPayload(value: Double.leastNonzeroMagnitude)
         #expect(actual == Self.expectedEnvelope(valueToken: "5e-324"))
     }
 
-    @Test("Smallest subnormal one ULP above the minimum renders canonically")
+    @Test(
+        "Smallest subnormal one ULP above the minimum renders canonically",
+        .tags(.lgp21)
+    )
     func leastNonzeroPlusOneUlpCanonicalBytes() throws {
         // `Double(bitPattern: 2)` is `1e-323` -- two ULPs above the
         // smallest subnormal, crossing exponent `-324` -> `-323`
@@ -81,25 +97,37 @@ struct CanonicalBinary64ProductionPathTests {
 
     // MARK: Exponent boundary formatting
 
-    @Test("Exponent value `e21` switches to scientific notation per the canonical window")
+    @Test(
+        "Exponent value `e21` switches to scientific notation per the canonical window",
+        .tags(.lgp21)
+    )
     func fixedToScientificBoundaryCanonicalBytes() throws {
         let actual = try Self.encodedPayload(value: 1e21)
         #expect(actual == Self.expectedEnvelope(valueToken: "1e21"))
     }
 
-    @Test("Exponent value `e20` stays in fixed-point notation per the canonical window")
+    @Test(
+        "Exponent value `e20` stays in fixed-point notation per the canonical window",
+        .tags(.lgp21)
+    )
     func fixedPointUpperBoundaryCanonicalBytes() throws {
         let actual = try Self.encodedPayload(value: 1e20)
         #expect(actual == Self.expectedEnvelope(valueToken: "100000000000000000000"))
     }
 
-    @Test("Exponent value `e-5` stays in fixed-point notation per the canonical window")
+    @Test(
+        "Exponent value `e-5` stays in fixed-point notation per the canonical window",
+        .tags(.lgp21)
+    )
     func fixedPointLowerBoundaryCanonicalBytes() throws {
         let actual = try Self.encodedPayload(value: 1e-5)
         #expect(actual == Self.expectedEnvelope(valueToken: "0.00001"))
     }
 
-    @Test("Exponent value `e-6` switches to scientific notation per the canonical window")
+    @Test(
+        "Exponent value `e-6` switches to scientific notation per the canonical window",
+        .tags(.lgp21)
+    )
     func scientificLowerBoundaryCanonicalBytes() throws {
         let actual = try Self.encodedPayload(value: 1e-6)
         #expect(actual == Self.expectedEnvelope(valueToken: "1e-6"))
@@ -107,7 +135,10 @@ struct CanonicalBinary64ProductionPathTests {
 
     // MARK: Signed zero collapse
 
-    @Test("Both `+0.0` and `-0.0` collapse to the single canonical token `0`")
+    @Test(
+        "Both `+0.0` and `-0.0` collapse to the single canonical token `0`",
+        .tags(.lgp21)
+    )
     func signedZeroCollapseCanonicalBytes() throws {
         let positive = try Self.encodedPayload(value: 0.0)
         let negative = try Self.encodedPayload(value: -0.0)
@@ -188,7 +219,10 @@ struct CanonicalBinary64ProductionPathTests {
         )
     }
 
-    @Test("Production renderer round-trips a deterministic finite-bit-pattern sweep")
+    @Test(
+        "Production renderer round-trips a deterministic finite-bit-pattern sweep",
+        .tags(.lgp21)
+    )
     func canonicalDoubleRendererBitPatternSweep() throws {
         var state: UInt64 = 0xAB_CD_EF_01_23_45_67_89
         let count = 8000
@@ -207,7 +241,10 @@ struct CanonicalBinary64ProductionPathTests {
         }
     }
 
-    @Test("Production renderer round-trips every exponent class boundary with mantissa 0")
+    @Test(
+        "Production renderer round-trips every exponent class boundary with mantissa 0",
+        .tags(.lgp21)
+    )
     func canonicalDoubleRendererExponentClassSweep() throws {
         // Biased exponent boundaries with mantissa 0.
         for biased in 1 ... 2046 {
@@ -215,7 +252,10 @@ struct CanonicalBinary64ProductionPathTests {
         }
     }
 
-    @Test("Production renderer round-trips a representative subnormal sweep")
+    @Test(
+        "Production renderer round-trips a representative subnormal sweep",
+        .tags(.lgp21)
+    )
     func canonicalDoubleSubnormalSweep() throws {
         // Walk subnormal mantissas `1, 2, 4, ..., 2^51`
         // (biased exponent `0`, IEEE-754 subnormal class).
