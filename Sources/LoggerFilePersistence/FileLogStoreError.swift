@@ -38,15 +38,15 @@ public enum FileLogStoreOperation: String, Sendable, Equatable {
     /// Opening or creating the writable segment file and seeking
     /// to its end.
     case openWritableSegment
+    /// Closing a segment file at a rotation boundary.
+    case closeWritableSegment
     /// Pre-admission validation boundary.
     case validateEnvelope
     /// Canonical envelope-line encoding step.
     case encodeEnvelope
     /// First mutating-storage boundary.
     case admitEnvelope
-    /// Writing one validated line per append operation.
     case appendEnvelopeBytes
-    /// Local synchronization boundary on `flush()`.
     case flushBoundary
 }
 

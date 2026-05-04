@@ -133,14 +133,13 @@ public enum FileLogStoreEnvelopeValidationError: Sendable, Equatable {
 public enum FileLogStoreOperation: String, Sendable, Equatable {
     case createDirectory
     case openWritableSegment
+    case closeWritableSegment
     /// Pre-admission validation boundary.
     case validateEnvelope
     case encodeEnvelope
     /// First mutating-storage boundary.
     case admitEnvelope
-    /// Writes one validated line per append operation.
     case appendEnvelopeBytes
-    /// Local synchronization operation.
     case flushBoundary
 }
 
@@ -189,26 +188,35 @@ public protocol ExportableLogStore: Sendable {
 
 ### Rotation and retention
 
+This sketch shows the joint future shape across rotation (LGP-6, shipped
+in M3.3.1) and retention (LGP-7, deferred to M3.3.2). Members marked with
+`// M3.3.2` are not part of the current API surface; they document the
+slot reserved for the next milestone.
+
+Configuration validation is factory-owned; composition is
+non-throwing.
+
 ```text
 extension FileLogStore.Configuration {
+    public init(directory: URL, rotation: RotationPolicy)
     public init(
         directory: URL,
         rotation: RotationPolicy,
         retention: RetentionPolicy
-    ) throws(FileLogStoreConfigurationError)
+    )                                                       // M3.3.2
 
     public var rotation: RotationPolicy
-    public var retention: RetentionPolicy
+    public var retention: RetentionPolicy                   // M3.3.2
 }
 
-public struct RotationPolicy: Sendable {
+public struct RotationPolicy: Sendable, Equatable {
     public static let never: Self
     public static func bySize(
         maxSegmentBytes: Int
     ) throws(FileLogStoreConfigurationError) -> Self
 }
 
-public struct RetentionPolicy: Sendable {
+public struct RetentionPolicy: Sendable, Equatable {        // M3.3.2
     public static let unlimited: Self
     public static func maxSegments(
         _ count: Int
@@ -224,9 +232,22 @@ public struct RetentionPolicy: Sendable {
 
 public enum FileLogStoreConfigurationError: Error, Sendable, Equatable {
     case invalidRotationPolicy
-    case invalidRetentionPolicy
+    case invalidRetentionPolicy                             // M3.3.2
 }
 ```
+
+`RotationPolicy.bySize(maxSegmentBytes:)` rejects any cap below
+`FileLogStore.maxEncodedLineBytes`, because a single canonical line that
+fits the encoded-line cap must also fit a fresh empty segment; otherwise
+admission could produce a line that no segment could hold.
+
+Segment topology under `bySize` is a policy contract, not part of the
+portable wire format: rotated segments use filenames of the form
+`log.<N>.ndjson` with `<N>` zero-padded to at least six digits;
+sequences that exceed the padding boundary grow naturally to wider
+names. Reopen discovery is width-independent, reopens from the highest
+decimal sequence present, and preserves append cardinality across
+reopen and rotation boundaries.
 
 Calendar-day rotation is omitted until timezone ownership, DST handling,
 and boundary monotonicity are defined.
