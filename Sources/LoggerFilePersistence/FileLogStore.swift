@@ -21,15 +21,19 @@ public actor FileLogStore: PersistentLogStore {
     /// Reopen discovery is width-independent.
     private static let rotatedSegmentSequenceWidth = 6
 
-    private let configuration: Configuration
+    /// Module-internal so the export extension in a sibling file
+    /// can resolve the configured root path under the same actor
+    /// mutex.
+    internal let configuration: Configuration
     private let lineEncoder = CanonicalEnvelopeLineEncoder()
     private var activeSegment: ActiveSegment?
     /// Held configured-root descriptor. Opened once on the first
     /// admit and reused for every subsequent segment open / rotation
     /// so a path-component swap of `configuration.directory` after
     /// the descriptor is held cannot redirect writes to a different
-    /// real directory.
-    private var writerRoot: SegmentRoot?
+    /// real directory. Module-internal so the export extension in a
+    /// sibling file can borrow it under the same actor mutex.
+    internal var writerRoot: SegmentRoot?
     /// Handles whose `close()` failed during a rotation transition.
     /// Retained on the actor so a transient close failure does not
     /// orphan a file descriptor; drained on each later admit/flush
@@ -49,6 +53,48 @@ public actor FileLogStore: PersistentLogStore {
     /// `SegmentRoot.open` so the post-open identity check sees a
     /// different inode and rejects.
     private var onBeforeWriterRootOpenForTesting: (@Sendable () throws -> Void)?
+
+    /// TEST-ONLY hook fired by the export critical section after
+    /// all segment bytes have been written to the temp file but
+    /// before `fsync(temp)`. Lets tests inject a write-failure
+    /// equivalent so the cleanup contract can be exercised
+    /// without a filesystem-level fault. Module-internal so the
+    /// export extension in a sibling file can read it under the
+    /// same actor mutex.
+    internal var onAfterWritingTemporaryBytesForTesting: (@Sendable () throws -> Void)?
+
+    /// TEST-ONLY hook fired by the export critical section after
+    /// the temp file has been closed and immediately before the
+    /// atomic `renameatx_np(... RENAME_EXCL)` commit. Lets tests
+    /// race the destination URL deterministically (e.g. plant a
+    /// pre-existing entry between final pre-check and commit) so
+    /// the no-overwrite + EEXIST re-probe paths are exercised.
+    /// Throws so test setup failures surface as a typed export
+    /// error instead of silently corrupting the test's premise.
+    internal var onBeforeCommitForTesting: (@Sendable () throws -> Void)?
+
+    /// TEST-ONLY hook fired at the end of `append` after the
+    /// admitted bytes have reached the active segment. Lets tests
+    /// observe append completion without a sleep when proving
+    /// single-flight serialization against `exportLogs(to:)`.
+    internal var onAfterAppendForTesting: (@Sendable () -> Void)?
+
+    /// TEST-ONLY hook fired at the very first instruction of
+    /// `append`, after the call has acquired the actor mutex but
+    /// before any work runs. Combined with
+    /// ``onAfterAppendForTesting`` this lets tests record an
+    /// `[append-entered, append-completed]` interval that the
+    /// actor mutex guarantees never overlaps an export's gate
+    /// interval.
+    internal var onBeforeAppendForTesting: (@Sendable () -> Void)?
+
+    /// TEST-ONLY hook fired at the start of
+    /// `closeExportTemporary`. A throw simulates a `close(2)`
+    /// failure deterministically so the cleanup contract can be
+    /// exercised without a filesystem-level fault. The
+    /// descriptor is best-effort closed before the hook's error
+    /// is projected onto `.closeTemporaryDestination`.
+    internal var onCloseTemporaryDestinationForTesting: (@Sendable () throws -> Void)?
 
     /// Creates a file-backed store.
     ///
@@ -85,6 +131,7 @@ public actor FileLogStore: PersistentLogStore {
     public func append(
         _ envelope: PersistentLogEnvelope
     ) async throws(FileLogStoreError) {
+        onBeforeAppendForTesting?()
         drainPendingCloseHandles()
         let lineBytes = try canonicalLineBytes(for: envelope)
         try Self.validateTrailingLF(lineBytes)
@@ -119,6 +166,7 @@ public actor FileLogStore: PersistentLogStore {
                 context: FileSystemErrorContext(from: error)
             )
         }
+        onAfterAppendForTesting?()
     }
 
     /// Verifies the encoded line ends with the canonical trailing
@@ -278,7 +326,7 @@ public actor FileLogStore: PersistentLogStore {
             throw FileLogStoreError(projecting: error, onto: .openWritableSegment)
         }
         // If trim/seek fails before ownership transfer, the
-        // opened handle is closed or retained for retry.
+        // opened handle is closed or retained for deferred close.
         var ownershipTransferred = false
         defer {
             if !ownershipTransferred {
@@ -321,7 +369,7 @@ public actor FileLogStore: PersistentLogStore {
         handle: FileHandle,
         segmentURL: URL
     ) throws(FileLogStoreError) {
-        // Boundary-only reopen scan; no per-line outcome list is materialized.
+        // Reopen positions the writer at the recoverable-prefix boundary.
         let resolution: RecoverablePrefixScanner.BoundaryResolution
         do {
             resolution = try RecoverablePrefixScanner.resolveBoundary(
@@ -484,7 +532,10 @@ extension FileLogStore {
         return DirectoryIdentity(statBuf)
     }
 
-    private func drainPendingCloseHandles() {
+    /// Module-internal so the export extension in a sibling file
+    /// can flush pending closes at the start of an export under
+    /// the same actor mutex.
+    internal func drainPendingCloseHandles() {
         guard !pendingCloseHandles.isEmpty else { return }
         let handles = pendingCloseHandles
         var retained: [FileHandle] = []
@@ -607,6 +658,59 @@ extension FileLogStore {
         _ hook: (@Sendable () throws -> Void)?
     ) {
         onBeforeWriterRootOpenForTesting = hook
+    }
+
+    /// TEST-ONLY: installs a hook that fires inside the export
+    /// critical section after all segment bytes have been written
+    /// to the temp file but before `fsync(temp)`. A throw from the
+    /// hook is projected onto
+    /// `.writeTemporaryDestinationBytes` so cleanup can be
+    /// asserted without a real write fault.
+    internal func _setOnAfterWritingTemporaryBytesForTesting(
+        _ hook: (@Sendable () throws -> Void)?
+    ) {
+        onAfterWritingTemporaryBytesForTesting = hook
+    }
+
+    /// TEST-ONLY: installs a hook fired inside the export critical
+    /// section after the temp file is closed and immediately
+    /// before the atomic commit, used to plant a destination
+    /// entry between final pre-check and `renameatx_np`. A throw
+    /// projects to `.operationFailed(.commitDestination)`.
+    internal func _setOnBeforeCommitForTesting(
+        _ hook: (@Sendable () throws -> Void)?
+    ) {
+        onBeforeCommitForTesting = hook
+    }
+
+    /// TEST-ONLY: installs a hook fired at the end of `append`
+    /// after admitted bytes reach the active segment. Used to
+    /// observe append completion ordering against export.
+    internal func _setOnAfterAppendForTesting(
+        _ hook: (@Sendable () -> Void)?
+    ) {
+        onAfterAppendForTesting = hook
+    }
+
+    /// TEST-ONLY: installs a hook fired at the first instruction
+    /// of `append`, immediately after the call acquires the actor
+    /// mutex. Pairs with `_setOnAfterAppendForTesting` to record
+    /// the actor-isolated interval for single-flight proofs.
+    internal func _setOnBeforeAppendForTesting(
+        _ hook: (@Sendable () -> Void)?
+    ) {
+        onBeforeAppendForTesting = hook
+    }
+
+    /// TEST-ONLY: installs a hook that simulates a `close(2)`
+    /// failure on the export temporary file. A throw projects to
+    /// `.operationFailed(.closeTemporaryDestination)`; the
+    /// descriptor is best-effort closed so the test does not
+    /// leak.
+    internal func _setOnCloseTemporaryDestinationForTesting(
+        _ hook: (@Sendable () throws -> Void)?
+    ) {
+        onCloseTemporaryDestinationForTesting = hook
     }
 
     private func ensureHandleNotPendingCloseForTesting(_ handle: FileHandle) throws {

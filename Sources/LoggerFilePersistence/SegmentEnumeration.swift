@@ -4,7 +4,7 @@ import Foundation
 /// Internal helpers for filename-based rotated-segment enumeration.
 ///
 /// Rotated segments use the layout `log.<digits>.ndjson` with a
-/// positive decimal sequence. Enumeration is filename-driven and
+/// positive ASCII-decimal sequence. Enumeration is filename-driven and
 /// width-independent so reopen survives operator-edited padding.
 /// Filename parsing and regular-file filtering live here only;
 /// other types must not duplicate the rules.
@@ -39,7 +39,7 @@ internal enum SegmentEnumeration {
     }
 
     /// Returns rotated segments under `directory` as
-    /// `(url, sequence)` pairs in numeric segment-index ascending
+    /// `(url, sequence)` pairs in numeric sequence ascending
     /// order. Single-call wrapper around ``SegmentRoot``.
     static func enumerateRotatedSegments(
         in directory: URL,
@@ -136,8 +136,8 @@ internal final class SegmentRoot: @unchecked Sendable {
         }
     }
 
-    /// Releases the root file descriptor. Subsequent calls into
-    /// the discovery/open API are not supported.
+    /// Releases the root file descriptor. Subsequent discovery or
+    /// segment-open calls on this instance are invalid.
     func close() {
         if rootFD >= 0 {
             Darwin.close(rootFD)
@@ -337,11 +337,12 @@ internal final class SegmentRoot: @unchecked Sendable {
         return descriptor
     }
 
-    /// Streams directory entry names through `body` via
-    /// `fdopendir(dup(rootFD))`. The `dup` keeps `rootFD` usable for
-    /// subsequent `openat`/`fstatat` after `closedir` consumes the
-    /// duplicate descriptor. Skips `.` and `..`; `body` is invoked
-    /// once per remaining entry and may throw to abort the scan.
+    /// Streams directory entry names through `body` via a fresh
+    /// directory stream opened with `openat(rootFD, ".", ...)` —
+    /// see `openDirHandle` for why this avoids the
+    /// shared-cursor bug that a `dup`-based open would
+    /// reintroduce. Skips `.` and `..`; `body` is invoked once per
+    /// remaining entry and may throw to abort the scan.
     private func forEachEntryName(
         _ body: (String) throws(InternalReadError) -> Void
     ) throws(InternalReadError) {
@@ -374,12 +375,19 @@ internal final class SegmentRoot: @unchecked Sendable {
         }
     }
 
-    /// Opens a fresh `DIR *` over `rootFD` via `fdopendir(dup(rootFD))`
-    /// and returns its handle. The duplicate descriptor is consumed
-    /// by `closedir` on the caller's side; `rootFD` itself stays open.
+    /// Opens a fresh `DIR *` over the held root via
+    /// `openat(rootFD, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC)` +
+    /// `fdopendir`. Using `openat(".")` instead of `dup(rootFD)`
+    /// gives the directory stream its own open-file description so
+    /// `readdir` cursor advancement does not bleed back into
+    /// `rootFD` (a `dup`'d descriptor would share the cursor and a
+    /// later enumeration would resume at end-of-stream and report
+    /// zero entries).
     private func openDirHandle() throws(InternalReadError) -> UnsafeMutablePointer<DIR> {
-        let dupFD = fcntl(rootFD, F_DUPFD_CLOEXEC, 0)
-        if dupFD < 0 {
+        let dirFD = ".".withCString { cDot in
+            Darwin.openat(rootFD, cDot, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        }
+        if dirFD < 0 {
             let savedErrno = errno
             throw .operationFailed(
                 operation: .enumerateSegments,
@@ -387,13 +395,13 @@ internal final class SegmentRoot: @unchecked Sendable {
                 context: FileSystemErrorContext(
                     domain: NSPOSIXErrorDomain,
                     code: Int(savedErrno),
-                    description: "fcntl(F_DUPFD_CLOEXEC) failed"
+                    description: "openat(rootFD, \".\", O_RDONLY|O_DIRECTORY|O_CLOEXEC) failed"
                 )
             )
         }
-        guard let dirHandle = fdopendir(dupFD) else {
+        guard let dirHandle = fdopendir(dirFD) else {
             let savedErrno = errno
-            Darwin.close(dupFD)
+            Darwin.close(dirFD)
             throw .operationFailed(
                 operation: .enumerateSegments,
                 url: directoryURL,

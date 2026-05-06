@@ -96,8 +96,8 @@ target exposes append-only writes.
 > **Important:** Recoverable visibility, not raw file size, defines
 > durable append success; canonical bytes define replay identity.
 
-The M3.3.0 target is intentionally unbounded: rotation, retention, and
-export are deferred.
+The M3.3.0 target is intentionally unbounded: rotation and retention
+are deferred. Byte-stable export lands in M3.3.2.
 
 ## Documentation
 
@@ -117,8 +117,8 @@ export are deferred.
 - [`Docs/Architecture.md`](Docs/Architecture.md) -- non-normative
   design overview (scope, non-goals, layering, logical view, failure
   model). `Architecture.md` is non-normative.
-- [`Docs/FutureExportDesign.md`](Docs/FutureExportDesign.md) --
-  non-contract export/remove design notes.
+- [`Docs/ExportAndRemoveDesign.md`](Docs/ExportAndRemoveDesign.md) --
+  non-normative export/remove design notes.
 - [`Docs/TestingGuidance.md`](Docs/TestingGuidance.md) --
   non-normative guidance for stable diagnostics assertions.
 - [`Docs/Requirements.md`](Docs/Requirements.md) -- LGP-1 ... LGP-39
