@@ -1,5 +1,6 @@
 import Foundation
 import LoggerPersistence
+import LoggerPersistenceTestSupport
 import Testing
 
 @testable import LoggerFilePersistence
@@ -229,7 +230,7 @@ struct FileLogStoreTests {
 
     @Test(
         "Reopening a segment with a trailing partial suffix discards the suffix before append",
-        .tags(.lgp14, .lgp15, .lgp24, .lgp25)
+        .tags(.lgp14, .lgp15, .lgp16, .lgp24, .lgp25)
     )
     func reopenWithPartialSuffixDiscardsSuffix() async throws {
         let directory = Self.uniqueDirectory()

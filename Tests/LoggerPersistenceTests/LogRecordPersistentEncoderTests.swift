@@ -1,4 +1,5 @@
 import Foundation
+import LoggerPersistenceTestSupport
 import Loggers
 import Testing
 
@@ -26,7 +27,10 @@ struct LogRecordPersistentEncoderTests {
 
     // MARK: Sequence
 
-    @Test("Encoder assigns monotonic sequence on each call starting at 1")
+    @Test(
+        "Encoder assigns monotonic sequence on each call starting at 1",
+        .tags(.lgp1, .lgp11)
+    )
     func sequenceIsMonotonic() throws {
         let encoder = LogRecordPersistentEncoder()
         var sequences: [UInt64] = []
@@ -37,7 +41,10 @@ struct LogRecordPersistentEncoderTests {
         #expect(sequences == [1, 2, 3, 4, 5])
     }
 
-    @Test("Encoder assigns a contiguous, unique sequence range across concurrent encodes")
+    @Test(
+        "Encoder assigns a contiguous, unique sequence range across concurrent encodes",
+        .tags(.lgp1, .lgp11)
+    )
     func concurrentEncodesProduceContiguousSequenceRange() async throws {
         let encoder = LogRecordPersistentEncoder()
         let count = 100
@@ -57,7 +64,10 @@ struct LogRecordPersistentEncoderTests {
         #expect(sequences.sorted() == Array(1 ... UInt64(count)))
     }
 
-    @Test("Encoder fails closed before emitting reserved sequence 0 on wrap")
+    @Test(
+        "Encoder fails closed before emitting reserved sequence 0 on wrap",
+        .tags(.lgp1, .lgp2)
+    )
     func sequenceWrapFailsClosed() throws {
         // Park the cursor at the last valid sequence value so the next
         // encode succeeds and the one after that exhausts the counter.
@@ -77,7 +87,10 @@ struct LogRecordPersistentEncoderTests {
         }
     }
 
-    @Test("Encoder rejects an envelope whose attribute is a non-finite Double")
+    @Test(
+        "Encoder rejects an envelope whose attribute is a non-finite Double",
+        .tags(.lgp2, .lgp38)
+    )
     func nonFiniteDoubleIsRejected() throws {
         let encoder = LogRecordPersistentEncoder()
         for nonFinite in [Double.infinity, -.infinity, .nan] {
@@ -91,7 +104,10 @@ struct LogRecordPersistentEncoderTests {
 
     // MARK: Redaction
 
-    @Test("Encoder redacts private message segments before writing")
+    @Test(
+        "Encoder redacts private message segments before writing",
+        .tags(.lgp4, .lgp21)
+    )
     func privateMessageSegmentRedacted() throws {
         let encoder = LogRecordPersistentEncoder()
         let username = "alice"
@@ -105,7 +121,10 @@ struct LogRecordPersistentEncoderTests {
         #expect(!payload.contains("alice"))
     }
 
-    @Test("Encoder redacts sensitive attribute values before writing")
+    @Test(
+        "Encoder redacts sensitive attribute values before writing",
+        .tags(.lgp4, .lgp21)
+    )
     func sensitiveAttributeRedacted() throws {
         let encoder = LogRecordPersistentEncoder()
         let envelope = try encoder.encode(
@@ -118,7 +137,10 @@ struct LogRecordPersistentEncoderTests {
         #expect(!payload.contains("secret"))
     }
 
-    @Test("Private attribute value is redacted but preserved as a typed string")
+    @Test(
+        "Private attribute value is redacted but preserved as a typed string",
+        .tags(.lgp4, .lgp21)
+    )
     func privateAttributeRedactedAsString() throws {
         let encoder = LogRecordPersistentEncoder()
         let envelope = try encoder.encode(
@@ -131,7 +153,10 @@ struct LogRecordPersistentEncoderTests {
         #expect(!payload.contains("alice"))
     }
 
-    @Test("Encoder preserves typed LogValue for public attributes")
+    @Test(
+        "Encoder preserves typed LogValue for public attributes",
+        .tags(.lgp21)
+    )
     func publicAttributesPreserveTypedLogValue() throws {
         let encoder = LogRecordPersistentEncoder()
         let envelope = try encoder.encode(
@@ -154,10 +179,15 @@ struct LogRecordPersistentEncoderTests {
         #expect(payload.contains(#""key":"ratio","value":1.5"#))
         #expect(payload.contains(#""key":"tags","value":["a","b"]"#))
     }
+}
 
+extension LogRecordPersistentEncoderTests {
     // MARK: Hints and content type
 
-    @Test("Encoder populates hints with level and domain")
+    @Test(
+        "Encoder populates hints with level and domain",
+        .tags(.lgp21)
+    )
     func hintsContainLevelAndDomain() throws {
         let encoder = LogRecordPersistentEncoder()
         let envelope = try encoder.encode(
@@ -167,7 +197,10 @@ struct LogRecordPersistentEncoderTests {
         #expect(envelope.hints["domain"] == "Network")
     }
 
-    @Test("Encoder uses the spec-locked content type")
+    @Test(
+        "Encoder uses the spec-locked content type",
+        .tags(.lgp21)
+    )
     func contentTypeMatchesSpec() throws {
         let encoder = LogRecordPersistentEncoder()
         let envelope = try encoder.encode(Self.makeRecord())
@@ -177,7 +210,10 @@ struct LogRecordPersistentEncoderTests {
 
     // MARK: Canonical payload bytes
 
-    @Test("Encoder emits canonical JSON bytes per FileFormatSpec")
+    @Test(
+        "Encoder emits canonical JSON bytes per FileFormatSpec",
+        .tags(.lgp21)
+    )
     func canonicalPayloadBytes() throws {
         let encoder = LogRecordPersistentEncoder()
         let envelope = try encoder.encode(
@@ -321,14 +357,20 @@ struct LogRecordPersistentEncoderTests {
         #expect(parsed == input)
     }
 
-    @Test("Encoder error type exposes the unsupportedLogValueCase fail-closed value")
+    @Test(
+        "Encoder error type exposes the unsupportedLogValueCase fail-closed value",
+        .tags(.lgp2)
+    )
     func unsupportedLogValueCaseIsPublic() {
         // Public error case remains available for future unsupported LogValue cases.
         let error = LogRecordPersistentEncoderError.unsupportedLogValueCase
         #expect(error == .unsupportedLogValueCase)
     }
 
-    @Test("Encoder error type exposes the canonicalRendererFailure fail-closed value")
+    @Test(
+        "Encoder error type exposes the canonicalRendererFailure fail-closed value",
+        .tags(.lgp2)
+    )
     func canonicalRendererFailureIsPublic() {
         // Public error case remains available for canonical renderer consistency failures.
         let error = LogRecordPersistentEncoderError.canonicalRendererFailure

@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import LoggerPersistence
 
@@ -16,15 +17,6 @@ public actor FileLogStore: PersistentLogStore {
     /// 2 MiB.
     public static let maxEncodedLineBytes = 2_097_152
 
-    /// Filename used when ``RotationPolicy/never`` is configured.
-    private static let unrotatedSegmentFileName = "log.ndjson"
-
-    /// Filename prefix shared by all rotated segments.
-    private static let rotatedSegmentFileNamePrefix = "log."
-
-    /// Filename suffix shared by all rotated segments.
-    private static let rotatedSegmentFileNameSuffix = ".ndjson"
-
     /// Minimum decimal width for rotated segment sequences.
     /// Reopen discovery is width-independent.
     private static let rotatedSegmentSequenceWidth = 6
@@ -32,11 +24,31 @@ public actor FileLogStore: PersistentLogStore {
     private let configuration: Configuration
     private let lineEncoder = CanonicalEnvelopeLineEncoder()
     private var activeSegment: ActiveSegment?
+    /// Held configured-root descriptor. Opened once on the first
+    /// admit and reused for every subsequent segment open / rotation
+    /// so a path-component swap of `configuration.directory` after
+    /// the descriptor is held cannot redirect writes to a different
+    /// real directory.
+    private var writerRoot: SegmentRoot?
     /// Handles whose `close()` failed during a rotation transition.
     /// Retained on the actor so a transient close failure does not
     /// orphan a file descriptor; drained on each later admit/flush
     /// boundary and on `deinit` as a best-effort retry.
     private var pendingCloseHandles: [FileHandle] = []
+
+    /// TEST-ONLY hook fired before each `openSegmentForWriting`
+    /// call (initial open and rotation) once the held writer root
+    /// is in hand. Lets tests deterministically race a path-swap
+    /// against `openat(rootFD, ...)`. A throw surfaces as
+    /// `.operationFailed(.openWritableSegment)`.
+    private var onBeforeOpenWritableSegmentForTesting: (@Sendable () throws -> Void)?
+
+    /// TEST-ONLY hook fired between the post-create root
+    /// `lstat(2)` snapshot and the descriptor open. Lets tests
+    /// deterministically race a path-component swap against
+    /// `SegmentRoot.open` so the post-open identity check sees a
+    /// different inode and rejects.
+    private var onBeforeWriterRootOpenForTesting: (@Sendable () throws -> Void)?
 
     /// Creates a file-backed store.
     ///
@@ -51,6 +63,7 @@ public actor FileLogStore: PersistentLogStore {
         for handle in pendingCloseHandles {
             try? handle.close()
         }
+        writerRoot?.close()
     }
 
     /// Encodes the envelope as one canonical LF-terminated NDJSON
@@ -199,25 +212,25 @@ public actor FileLogStore: PersistentLogStore {
         }
     }
 
-    /// Reopen resumes from the highest discovered rotated segment.
+    /// Reopen resumes from the highest discovered rotated segment
+    /// using the held writer-root descriptor; both discovery and
+    /// segment open are descriptor-relative against the same root.
     private func openInitialSegment() throws(FileLogStoreError) -> ActiveSegment {
-        let fileManager = FileManager.default
-        try createDirectoryIfNeeded(fileManager: fileManager)
+        let root = try ensureWriterRoot()
         switch configuration.rotation.kind {
         case .never:
-            let url = configuration.directory.appendingPathComponent(Self.unrotatedSegmentFileName)
-            return try openNewSegment(url: url, sequence: nil, fileManager: fileManager)
+            let url = SegmentEnumeration.unrotatedSegmentURL(in: configuration.directory)
+            return try openNewSegment(root: root, url: url, sequence: nil)
         case .bySize:
-            let sequence = try discoverHighestRotatedSegmentSequence(fileManager: fileManager) ?? 1
+            let sequence = try discoverHighestRotatedSegmentSequence(root: root) ?? 1
             let url = rotatedSegmentURL(sequence: sequence)
-            return try openNewSegment(url: url, sequence: sequence, fileManager: fileManager)
+            return try openNewSegment(root: root, url: url, sequence: sequence)
         }
     }
 
     private func rotateToNextSegment(
         after current: ActiveSegment
     ) throws(FileLogStoreError) -> ActiveSegment {
-        let fileManager = FileManager.default
         let baseSequence = current.sequence ?? 0
         let (nextSequence, didOverflow) = baseSequence.addingReportingOverflow(1)
         guard !didOverflow else {
@@ -225,16 +238,19 @@ public actor FileLogStore: PersistentLogStore {
                 operation: .openWritableSegment,
                 url: current.url,
                 context: FileSystemErrorContext(
-                    domain: "LoggerFilePersistence",
+                    domain: FileSystemErrorContext.packageDomain,
                     code: nil,
                     description: "rotated segment sequence overflow"
                 )
             )
         }
+        let root = try ensureWriterRoot()
         let url = rotatedSegmentURL(sequence: nextSequence)
         // Activate the next segment before closing the previous
-        // handle; close failures are retained for retry.
-        let next = try openNewSegment(url: url, sequence: nextSequence, fileManager: fileManager)
+        // handle; close failures are retained for retry. The next
+        // segment opens through the same held descriptor as the
+        // previous one — rotation does not re-resolve the path.
+        let next = try openNewSegment(root: root, url: url, sequence: nextSequence)
         activeSegment = next
         do {
             try current.handle.close()
@@ -250,20 +266,16 @@ public actor FileLogStore: PersistentLogStore {
     }
 
     private func openNewSegment(
+        root: SegmentRoot,
         url: URL,
-        sequence: UInt64?,
-        fileManager: FileManager
+        sequence: UInt64?
     ) throws(FileLogStoreError) -> ActiveSegment {
-        try ensureRegularFileSegmentExists(segmentURL: url, fileManager: fileManager)
+        try fireBeforeOpenWritableSegmentSeam(url: url)
         let handle: FileHandle
         do {
-            handle = try FileHandle(forUpdating: url)
+            handle = try root.openSegmentForWriting(url: url)
         } catch {
-            throw .operationFailed(
-                operation: .openWritableSegment,
-                url: url,
-                context: FileSystemErrorContext(from: error)
-            )
+            throw FileLogStoreError(projecting: error, onto: .openWritableSegment)
         }
         // If trim/seek fails before ownership transfer, the
         // opened handle is closed or retained for retry.
@@ -295,31 +307,46 @@ public actor FileLogStore: PersistentLogStore {
 
     /// Returns the rotated-segment URL for `sequence`.
     private func rotatedSegmentURL(sequence: UInt64) -> URL {
-        var digits = String(sequence)
-        while digits.utf8.count < Self.rotatedSegmentSequenceWidth {
-            digits = "0" + digits
-        }
-        let name = Self.rotatedSegmentFileNamePrefix
-            + digits
-            + Self.rotatedSegmentFileNameSuffix
-        return configuration.directory.appendingPathComponent(name)
+        SegmentEnumeration.rotatedSegmentURL(
+            in: configuration.directory,
+            sequence: sequence,
+            minimumWidth: Self.rotatedSegmentSequenceWidth
+        )
     }
 
-    /// Trims bytes after the last LF and seeks to the append
-    /// boundary.
+    /// Positions `handle` at the recoverable-prefix boundary,
+    /// truncating trailing partial bytes and failing closed on
+    /// interior corruption.
     private func trimTrailingSuffixAndPosition(
         handle: FileHandle,
         segmentURL: URL
     ) throws(FileLogStoreError) {
-        let boundary: UInt64
+        // Boundary-only reopen scan; no per-line outcome list is materialized.
+        let resolution: RecoverablePrefixScanner.BoundaryResolution
         do {
-            let size = try handle.seekToEnd()
-            boundary = try Self.lastLineTerminatorOffset(in: handle, size: size)
+            resolution = try RecoverablePrefixScanner.resolveBoundary(
+                handle: handle,
+                segmentURL: segmentURL
+            )
         } catch {
+            throw FileLogStoreError(
+                projecting: error,
+                onto: .openWritableSegment
+            )
+        }
+        let boundary: UInt64
+        switch resolution {
+        case let .boundary(value):
+            boundary = value
+        case .interiorCorruption:
             throw .operationFailed(
                 operation: .openWritableSegment,
                 url: segmentURL,
-                context: FileSystemErrorContext(from: error)
+                context: FileSystemErrorContext(
+                    domain: FileSystemErrorContext.packageDomain,
+                    code: nil,
+                    description: "interiorCorruption"
+                )
             )
         }
         do {
@@ -336,18 +363,56 @@ public actor FileLogStore: PersistentLogStore {
 }
 
 extension FileLogStore {
-    /// Returns the highest rotated-segment sequence present in
-    /// the configured directory, or `nil` when none exist.
+    /// Returns the highest rotated-segment sequence for writer reopen.
     private func discoverHighestRotatedSegmentSequence(
-        fileManager: FileManager
+        root: SegmentRoot
     ) throws(FileLogStoreError) -> UInt64? {
-        let entries: [URL]
         do {
-            entries = try fileManager.contentsOfDirectory(
-                at: configuration.directory,
-                includingPropertiesForKeys: [.isRegularFileKey],
-                options: [.skipsHiddenFiles]
+            return try root.highestRotatedSegmentSequence()
+        } catch {
+            throw FileLogStoreError(
+                projecting: error,
+                onto: .openWritableSegment
             )
+        }
+    }
+
+    /// Creates, validates, opens, and identity-binds the configured writer root.
+    private func ensureWriterRoot() throws(FileLogStoreError) -> SegmentRoot {
+        if let root = writerRoot { return root }
+        let identity = try createDirectoryIfNeeded(fileManager: FileManager.default)
+        try fireBeforeWriterRootOpenSeam()
+        let opened: SegmentRoot?
+        do {
+            opened = try SegmentRoot.open(directory: configuration.directory)
+        } catch {
+            throw FileLogStoreError(projecting: error, onto: .openWritableSegment)
+        }
+        guard let root = opened else {
+            throw .operationFailed(
+                operation: .openWritableSegment,
+                url: configuration.directory,
+                context: FileSystemErrorContext(
+                    domain: FileSystemErrorContext.packageDomain,
+                    code: nil,
+                    description: "configuredDirectoryAbsentAfterCreate"
+                )
+            )
+        }
+        do {
+            try root.validateIdentity(matches: identity)
+        } catch {
+            root.close()
+            throw FileLogStoreError(projecting: error, onto: .openWritableSegment)
+        }
+        writerRoot = root
+        return root
+    }
+
+    private func fireBeforeWriterRootOpenSeam() throws(FileLogStoreError) {
+        guard let hook = onBeforeWriterRootOpenForTesting else { return }
+        do {
+            try hook()
         } catch {
             throw .operationFailed(
                 operation: .openWritableSegment,
@@ -355,41 +420,27 @@ extension FileLogStore {
                 context: FileSystemErrorContext(from: error)
             )
         }
-        var highest: UInt64?
-        for entry in entries {
-            let isRegularFile: Bool?
-            do {
-                isRegularFile = try entry
-                    .resourceValues(forKeys: [.isRegularFileKey])
-                    .isRegularFile
-            } catch {
-                throw .operationFailed(
-                    operation: .openWritableSegment,
-                    url: entry,
-                    context: FileSystemErrorContext(from: error)
-                )
-            }
-            guard isRegularFile == true else { continue }
-            let name = entry.lastPathComponent
-            guard name.hasPrefix(Self.rotatedSegmentFileNamePrefix),
-                  name.hasSuffix(Self.rotatedSegmentFileNameSuffix)
-            else { continue }
-            let middle = name
-                .dropFirst(Self.rotatedSegmentFileNamePrefix.count)
-                .dropLast(Self.rotatedSegmentFileNameSuffix.count)
-            guard !middle.isEmpty,
-                  middle.utf8.allSatisfy(Self.isASCIIDigit),
-                  let sequence = UInt64(middle),
-                  sequence > 0
-            else { continue }
-            highest = max(highest ?? 0, sequence)
-        }
-        return highest
     }
 
+    private func fireBeforeOpenWritableSegmentSeam(
+        url: URL
+    ) throws(FileLogStoreError) {
+        guard let hook = onBeforeOpenWritableSegmentForTesting else { return }
+        do {
+            try hook()
+        } catch {
+            throw .operationFailed(
+                operation: .openWritableSegment,
+                url: url,
+                context: FileSystemErrorContext(from: error)
+            )
+        }
+    }
+
+    /// Creates the configured directory and returns its `lstat(2)` identity.
     private func createDirectoryIfNeeded(
         fileManager: FileManager
-    ) throws(FileLogStoreError) {
+    ) throws(FileLogStoreError) -> DirectoryIdentity {
         do {
             try fileManager.createDirectory(
                 at: configuration.directory,
@@ -402,83 +453,35 @@ extension FileLogStore {
                 context: FileSystemErrorContext(from: error)
             )
         }
-        let isDirectory: Bool?
-        do {
-            isDirectory = try configuration.directory
-                .resourceValues(forKeys: [.isDirectoryKey])
-                .isDirectory
-        } catch {
-            throw .operationFailed(
-                operation: .createDirectory,
-                url: configuration.directory,
-                context: FileSystemErrorContext(from: error)
-            )
+        // Capture root identity without following symlinks.
+        var statBuf = stat()
+        let result = configuration.directory.path.withCString { cPath in
+            lstat(cPath, &statBuf)
         }
-        guard isDirectory == true else {
+        if result != 0 {
+            let savedErrno = errno
             throw .operationFailed(
                 operation: .createDirectory,
                 url: configuration.directory,
                 context: FileSystemErrorContext(
-                    domain: "LoggerFilePersistence",
+                    domain: NSPOSIXErrorDomain,
+                    code: Int(savedErrno),
+                    description: "lstatFailed"
+                )
+            )
+        }
+        guard (statBuf.st_mode & S_IFMT) == S_IFDIR else {
+            throw .operationFailed(
+                operation: .createDirectory,
+                url: configuration.directory,
+                context: FileSystemErrorContext(
+                    domain: FileSystemErrorContext.packageDomain,
                     code: nil,
                     description: "configured directory URL exists but is not a directory"
                 )
             )
         }
-    }
-
-    private func ensureRegularFileSegmentExists(
-        segmentURL: URL,
-        fileManager: FileManager
-    ) throws(FileLogStoreError) {
-        if fileManager.fileExists(atPath: segmentURL.path) {
-            try validateSegmentIsRegularFile(segmentURL: segmentURL)
-            return
-        }
-        guard fileManager.createFile(atPath: segmentURL.path, contents: nil) else {
-            throw .operationFailed(
-                operation: .openWritableSegment,
-                url: segmentURL,
-                context: FileSystemErrorContext(
-                    domain: "LoggerFilePersistence",
-                    code: nil,
-                    description: "segment file could not be created"
-                )
-            )
-        }
-        try validateSegmentIsRegularFile(segmentURL: segmentURL)
-    }
-
-    private func validateSegmentIsRegularFile(
-        segmentURL: URL
-    ) throws(FileLogStoreError) {
-        let isRegularFile: Bool?
-        do {
-            isRegularFile = try segmentURL
-                .resourceValues(forKeys: [.isRegularFileKey])
-                .isRegularFile
-        } catch {
-            throw .operationFailed(
-                operation: .openWritableSegment,
-                url: segmentURL,
-                context: FileSystemErrorContext(from: error)
-            )
-        }
-        guard isRegularFile == true else {
-            throw .operationFailed(
-                operation: .openWritableSegment,
-                url: segmentURL,
-                context: FileSystemErrorContext(
-                    domain: "LoggerFilePersistence",
-                    code: nil,
-                    description: "segment URL exists but is not a regular file"
-                )
-            )
-        }
-    }
-
-    private static func isASCIIDigit(_ byte: UInt8) -> Bool {
-        (0x30 ... 0x39).contains(byte)
+        return DirectoryIdentity(statBuf)
     }
 
     private func drainPendingCloseHandles() {
@@ -508,48 +511,6 @@ extension FileLogStore {
 }
 
 extension FileLogStore {
-    /// Returns the byte offset immediately after the segment's
-    /// last LF, or `0` when no LF is present.
-    private static func lastLineTerminatorOffset(
-        in handle: FileHandle,
-        size: UInt64
-    ) throws -> UInt64 {
-        if size == 0 { return 0 }
-        let chunkSize: UInt64 = 4096
-        var scanEnd = size
-        while true {
-            let chunkStart = scanEnd > chunkSize ? scanEnd - chunkSize : 0
-            let chunkLen = Int(scanEnd - chunkStart)
-            try handle.seek(toOffset: chunkStart)
-            let chunk = try readExactly(handle: handle, count: chunkLen)
-            if let lfIndex = chunk.lastIndex(of: 0x0A) {
-                return chunkStart + UInt64(lfIndex) + 1
-            }
-            if chunkStart == 0 { return 0 }
-            scanEnd = chunkStart
-        }
-    }
-
-    private static func readExactly(
-        handle: FileHandle,
-        count: Int
-    ) throws -> Data {
-        var accumulated = Data()
-        accumulated.reserveCapacity(count)
-        while accumulated.count < count {
-            let remaining = count - accumulated.count
-            guard let chunk = try handle.read(upToCount: remaining),
-                  !chunk.isEmpty
-            else {
-                throw POSIXError(.EIO)
-            }
-            accumulated.append(chunk)
-        }
-        return accumulated
-    }
-}
-
-extension FileLogStore {
     /// Construction-time configuration for ``FileLogStore``.
     public struct Configuration: Sendable {
         /// Directory containing segment files.
@@ -574,16 +535,22 @@ extension FileLogStore {
 
 internal enum TestSeamFailure: Error, Sendable {
     case noActiveSegment
+    case handleAlreadyPendingClose
 }
 
 // TEST-ONLY failure-injection seams.
 extension FileLogStore {
     // swiftlint:disable identifier_name
 
+    /// TEST-ONLY: closes the active handle and clears `activeSegment`.
+    /// Failed close is retained for retry.
+    ///
+    /// Invariant: active handle must not already be pending close.
     internal func _forceCloseActiveHandleForTesting() throws {
         guard let active = activeSegment else {
             throw TestSeamFailure.noActiveSegment
         }
+        try ensureHandleNotPendingCloseForTesting(active.handle)
         do {
             try active.handle.close()
             activeSegment = nil
@@ -594,13 +561,15 @@ extension FileLogStore {
         }
     }
 
-    /// Deliberately leaves `activeSegment` pointing at a
-    /// closed handle to exercise invalid-handle recovery.
+    /// TEST-ONLY: leaves `activeSegment` pointing at a closed handle.
+    ///
+    /// Invariant: active handle must not already be pending close.
     internal func _forceCloseActiveHandleLeavingInvalidReferenceForTesting() throws {
         guard let active = activeSegment else {
             throw TestSeamFailure.noActiveSegment
         }
         let handle = active.handle
+        try ensureHandleNotPendingCloseForTesting(handle)
         try handle.close()
         activeSegment = ActiveSegment(
             handle: handle,
@@ -610,12 +579,40 @@ extension FileLogStore {
         )
     }
 
-    internal func _injectPendingCloseHandleForTesting(_ handle: FileHandle) {
+    /// TEST-ONLY: injects a handle into the pending-close retry queue.
+    /// The handle must not already be present in the queue.
+    internal func _injectPendingCloseHandleForTesting(_ handle: FileHandle) throws {
+        try ensureHandleNotPendingCloseForTesting(handle)
         pendingCloseHandles.append(handle)
     }
 
     internal var _pendingCloseHandleCountForTesting: Int {
         pendingCloseHandles.count
+    }
+
+    /// TEST-ONLY: installs a hook that fires immediately before each
+    /// `openSegmentForWriting` call (initial open and rotation) once
+    /// the held writer root is in hand. A throw from the hook is
+    /// projected onto `.openWritableSegment`.
+    internal func _setOnBeforeOpenWritableSegmentForTesting(
+        _ hook: (@Sendable () throws -> Void)?
+    ) {
+        onBeforeOpenWritableSegmentForTesting = hook
+    }
+
+    /// TEST-ONLY: installs a hook that fires between the post-create
+    /// root `lstat` snapshot and the `SegmentRoot.open` call. A
+    /// throw from the hook is projected onto `.openWritableSegment`.
+    internal func _setOnBeforeWriterRootOpenForTesting(
+        _ hook: (@Sendable () throws -> Void)?
+    ) {
+        onBeforeWriterRootOpenForTesting = hook
+    }
+
+    private func ensureHandleNotPendingCloseForTesting(_ handle: FileHandle) throws {
+        guard !pendingCloseHandles.contains(where: { $0 === handle }) else {
+            throw TestSeamFailure.handleAlreadyPendingClose
+        }
     }
 
     // swiftlint:enable identifier_name
