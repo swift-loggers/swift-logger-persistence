@@ -154,11 +154,13 @@ public struct FileSystemErrorContext: Sendable, Equatable {
 }
 ```
 
-M3.3.0 target capabilities documented by this spec-only PR:
+M3.3.0 baseline capabilities:
 
 - append/flush-only persistence API
-- no replay/export APIs
+- no replay APIs
 - deferred retention
+
+M3.3.2 adds byte-stable export and destructive removal below.
 
 Segment topology is outside the portable compatibility contract.
 
@@ -175,13 +177,17 @@ Error guarantees:
 
 ## Byte-stable export -- M3.3.2
 
-`FileLogStore` exposes a single concrete export method. Per-protocol
-shape (`ExportableLogStore` with `removeExportedLogs()`) is deferred
-because adding a protocol requirement after release would be a public
-API break; the protocol lands together with the destructive
-`removeExportedLogs()` lifecycle in a later milestone.
+`FileLogStore` exposes a concrete typed export method. The portable
+`ExportableLogStore` protocol pairs byte-stable export with the
+destructive remove lifecycle so the protocol does not need a later
+requirement addition.
 
 ```swift
+public protocol ExportableLogStore: Sendable {
+    func exportLogs(to url: URL) async throws
+    func removeExportedLogs() async throws
+}
+
 extension FileLogStore {
     public func exportLogs(
         to url: URL
@@ -202,10 +208,10 @@ classification requires a public addition before it can be projected.
 
 Serialization semantics:
 
-- The actor executes `exportLogs(to:)` without interleaving
-  `append`, `flush`, or rotation. Export discovery and export
-  writes execute within the same actor-isolated operation;
-  concurrent callers wait for actor-isolated execution.
+- `exportLogs(to:)` holds the nonreentrant operation boundary for
+  export discovery and export writes. Concurrent `append`, `flush`,
+  `exportLogs(to:)`, and `removeExportedLogs()` callers wait until
+  the export releases that boundary.
 - `exportLogs(to:)` does not call `flush()` implicitly. Recoverable
   visibility is the durability boundary. Callers that want
   export-after-flush call `flush()` themselves.
@@ -215,12 +221,18 @@ Atomicity contract:
 
 - Any pre-existing entry at the destination URL yields
   `.invalidDestination(reason:)`; the destination is not modified.
-- Export writes to a unique temporary file in the destination parent
-  directory using no-overwrite creation semantics.
-- The temporary file's contents are made durable before the commit.
+- Export writes to a unique temporary file inside a private
+  temporary directory in the destination parent using no-overwrite
+  creation semantics.
+- Export destination file permissions are governed by platform
+  umask during export destination creation; the API does not
+  force an owner-only mode.
+- The temporary file's contents are made durable before the atomic
+  commit.
 - Final commit is atomic and must not overwrite an existing
   destination.
-- Directory-entry durability after commit is best-effort.
+- Destination-parent directory-entry durability after commit is
+  best-effort.
 - On any failure between create and commit the export attempts
   temporary-file cleanup. The export never creates partial final bytes
   and never overwrites a destination that materializes concurrently.
@@ -241,29 +253,90 @@ Bytes contract:
 - Duplicate `sequence` values are preserved verbatim; logical
   duplicate detection is a separate future API.
 
-## Future shape (deferred -- not in M3.3.2)
+## Destructive removal -- M3.3.2
 
-Deferred non-normative sketches.
+`FileLogStore` implements the destructive remove lifecycle behind
+the `ExportableLogStore` conformance. Removal is authorized only by
+the in-memory boundary captured by a prior successful byte-stable
+export.
 
-### Export and remove protocol
-
-```text
-public protocol ExportableLogStore: Sendable {
-    func exportLogs(to url: URL) async throws
-    func removeExportedLogs() async throws
+```swift
+extension FileLogStore: ExportableLogStore {
+    public func removeExportedLogs() async throws(FileLogStoreRemoveError)
 }
 ```
 
-`exportLogs(to:)` will conform `FileLogStore` to this protocol when
-`removeExportedLogs()` lands; the public method signature stays
-compatible.
+Public error surface lives in
+`Sources/LoggerFilePersistence/FileLogStoreRemoveError.swift`:
 
-### Rotation and retention
+- `FileLogStoreRemoveError.operationFailed(operation:url:context:)`
+- `FileLogStoreRemoveError.noExportedRemovalBoundary`
+- `FileLogStoreRemoveError.removalBoundaryStale(url:context:)`
+- `FileLogStoreRemoveError.implementationInvariantViolation(violation:)`
+
+Removal-boundary contract:
+
+- `exportLogs(to:)` captures the removal boundary only after the
+  final export destination commit succeeds.
+- A failed export does not create or advance a removal boundary.
+- The boundary is implicit and in-memory. Restart clears it; a later
+  remove fails with `.noExportedRemovalBoundary`.
+- Bytes before `exportedPrefixEnd` are eligible for removal.
+- Accepted bytes at or after `exportedPrefixEnd` are outside the
+  removal boundary and must be preserved byte-for-byte.
+- Segments created after export are outside the boundary and must not
+  be removed.
+
+Serialization semantics:
+
+- `removeExportedLogs()` holds the nonreentrant operation boundary
+  while processing the removal boundary. Concurrent `append`,
+  `flush`, `exportLogs(to:)`, and `removeExportedLogs()` callers
+  wait until removal releases that boundary.
+- Once physical removal begins, the destructive mutation path does
+  not suspend.
+
+Removal mechanics:
+
+- Fully exported non-active rotated segments are unlinked.
+- Fully exported active segments preserve no accepted bytes before the
+  removal boundary, and subsequent appends continue after the preserved
+  removal boundary.
+- Segments with post-boundary bytes preserve the post-boundary suffix
+  byte-for-byte through a unique sibling temporary file whose contents
+  are made durable before the atomic commit that replaces the original
+  segment.
+- Removal never treats `exportedPrefixEnd` as the new segment length;
+  that would keep exported bytes and delete post-boundary bytes.
+- Active-segment compaction coordinates with writer ownership so
+  appends continue after the preserved removal boundary.
+
+Failure and retry contract:
+
+- Before mutation, every remaining boundary entry must still refer to
+  the same file identity, current file size must be at least
+  `exportedPrefixEnd`, and ambiguous rotated topology must fail
+  closed.
+- Stale boundary detection yields `.removalBoundaryStale` before
+  destructive mutation of that entry.
+- Removal is retryable per segment, not all-or-nothing across all
+  entries. Completed destructive steps are not retried.
+- On failure, the remaining in-memory boundary is retained for retry.
+- On full success, the boundary is cleared. A second remove without a
+  new successful export fails with `.noExportedRemovalBoundary`.
+- Directory-entry durability after unlink or replace is best-effort
+  and must not be overclaimed.
+
+## Future shape (deferred)
+
+Deferred non-normative sketches.
+
+### Retention policy
 
 This sketch shows the joint future shape across rotation (LGP-6, shipped
-in M3.3.1) and retention (LGP-7, deferred to M3.3.2). Members marked with
-`// M3.3.2` are not part of the current API surface; they document the
-slot reserved for the next milestone.
+in M3.3.1) and retention (LGP-7, deferred). Members marked with
+`// Deferred` are not part of the current API surface; they document
+the slot reserved for a later milestone.
 
 Configuration validation is factory-owned; composition is
 non-throwing.
@@ -275,10 +348,10 @@ extension FileLogStore.Configuration {
         directory: URL,
         rotation: RotationPolicy,
         retention: RetentionPolicy
-    )                                                       // M3.3.2
+    )                                                       // Deferred
 
     public var rotation: RotationPolicy
-    public var retention: RetentionPolicy                   // M3.3.2
+    public var retention: RetentionPolicy                   // Deferred
 }
 
 public struct RotationPolicy: Sendable, Equatable {
@@ -288,7 +361,7 @@ public struct RotationPolicy: Sendable, Equatable {
     ) throws(FileLogStoreConfigurationError) -> Self
 }
 
-public struct RetentionPolicy: Sendable, Equatable {        // M3.3.2
+public struct RetentionPolicy: Sendable, Equatable {        // Deferred
     public static let unlimited: Self
     public static func maxSegments(
         _ count: Int
@@ -304,7 +377,7 @@ public struct RetentionPolicy: Sendable, Equatable {        // M3.3.2
 
 public enum FileLogStoreConfigurationError: Error, Sendable, Equatable {
     case invalidRotationPolicy
-    case invalidRetentionPolicy                             // M3.3.2
+    case invalidRetentionPolicy                             // Deferred
 }
 ```
 

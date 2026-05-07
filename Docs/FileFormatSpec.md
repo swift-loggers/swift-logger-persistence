@@ -2,8 +2,8 @@
 
 Normative wire-format and corruption contract for package-provided
 file-backed stores. `APIDesign.md` owns the Swift API;
-this document owns the portable on-disk profile for stores and future
-replay/export implementations.
+this document owns the portable on-disk profile for stores and
+package-provided replay/export behavior.
 
 This document is the single normative source for the persistence contract;
 conflicting wording elsewhere is non-authoritative. Normative keywords

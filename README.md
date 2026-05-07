@@ -1,7 +1,7 @@
 # swift-logger-persistence
 
 Local durable persistence primitives for [`swift-loggers`](https://github.com/swift-loggers):
-an adapter-agnostic envelope/store contract plus a planned file-backed
+an adapter-agnostic envelope/store contract plus a file-backed
 implementation.
 
 SwiftPM manifest, platform minima, and the `LoggerPersistence` core
@@ -11,18 +11,17 @@ target ship with this repository. MIT licensed.
 
 ## Products
 
-The currently shipped package shape exposes one product:
+The currently shipped package shape exposes two products:
 
 - `LoggerPersistence` -- protocols and data model. The product
   exposes `PersistentLogEnvelope`, `PersistentLogStore`, and
-  `LogRecordPersistentEncoder`. Canonical JSON / binary64 /
-  RFC 3339 millisecond encoding is implemented internally per
-  [`Docs/FileFormatSpec.md`](Docs/FileFormatSpec.md) and is not
-  part of the public surface.
-
-A second product, `LoggerFilePersistence` (file-backed `FileLogStore`
-actor and configuration), is intentionally parked for a follow-up
-PR; it is not part of the manifest in this repository today.
+  `LogRecordPersistentEncoder`. Canonical envelope encoding is
+  implemented by package-owned encoders and governed by
+  [`Docs/FileFormatSpec.md`](Docs/FileFormatSpec.md); it is not part
+  of the public API surface.
+- `LoggerFilePersistence` -- file-backed `FileLogStore`,
+  configuration, byte-stable export, and destructive removal
+  lifecycle.
 
 ## Installation
 
@@ -72,10 +71,16 @@ the envelope / store / encoder surface:
 .product(name: "LoggerPersistence", package: "swift-logger-persistence")
 ```
 
+Targets that need the file-backed store add `LoggerFilePersistence`:
+
+```swift
+.product(name: "LoggerFilePersistence", package: "swift-logger-persistence")
+```
+
 The package depends on
 [`swift-loggers/swift-logger`](https://github.com/swift-loggers/swift-logger)
-for the `Loggers.LogRecord` shape. Platform minima follow the planned
-file-backed APIs (iOS 13.4 / tvOS 13.4 / macOS 10.15.4 / watchOS 6.2 /
+for the `Loggers.LogRecord` shape. Platform minima follow the
+file-backed API surface (iOS 13.4 / tvOS 13.4 / macOS 10.15.4 / watchOS 6.2 /
 visionOS 1) so the manifest stays compatible across the milestone PR
 sequence.
 
@@ -89,39 +94,44 @@ Logger adapter -> LogRecordPersistentEncoder -> PersistentLogEnvelope -> FileLog
 
 `LogRecordPersistentEncoder` redacts the message and attributes and
 produces an envelope.
-The planned `FileLogStore` accepts envelopes through the
-`PersistentLogStore` protocol and writes them as NDJSON. The M3.3.0
-target exposes append-only writes.
+`FileLogStore` accepts envelopes through the
+`PersistentLogStore` protocol and writes LF-terminated NDJSON
+accepted lines. The M3.3.0 target exposes append/flush-only
+persistence APIs.
 
 > **Important:** Recoverable visibility, not raw file size, defines
-> durable append success; canonical bytes define replay identity.
+> durable append success; canonical bytes and accepted ordering define
+> replay identity.
 
-The M3.3.0 target is intentionally unbounded: rotation and retention
-are deferred. Byte-stable export lands in M3.3.2.
+The M3.3.0 target is intentionally unbounded. Size-based rotation
+lands in M3.3.1; byte-stable export and destructive removal land in
+M3.3.2. Retention remains deferred.
 
 ## Documentation
 
 - [`Docs/FileFormatSpec.md`](Docs/FileFormatSpec.md) -- normative
-  file-format, deterministic encoding, recoverable-prefix, parser
-  parity, durability, byte-stable export, and corruption corpus contract.
+  file-format, deterministic encoding, recoverable-prefix, approved
+  parser-profile governance, durability, byte-stable export, and
+  corruption corpus contract.
   It is the normative source for persistence semantics and outranks
   `APIDesign.md` for those rules, including replay/export
   compatibility.
-- [`Docs/CorpusSpec.md`](Docs/CorpusSpec.md) -- future detailed
+- [`Docs/CorpusSpec.md`](Docs/CorpusSpec.md) -- detailed
   fixture plan for the conformance corpus.
 - [`Docs/APICompatibility.md`](Docs/APICompatibility.md) --
   public diagnostic evolution policy.
-- [`Docs/APIDesign.md`](Docs/APIDesign.md) -- API design draft, with
-  the M3.3.0 surface and the future shape clearly separated; it is
-  intentionally non-normative for wire-format semantics.
+- [`Docs/APIDesign.md`](Docs/APIDesign.md) -- API design draft,
+  including current file-store export/remove surfaces and deferred
+  retention shape; it is intentionally non-normative for wire-format
+  semantics.
 - [`Docs/Architecture.md`](Docs/Architecture.md) -- non-normative
   design overview (scope, non-goals, layering, logical view, failure
-  model). `Architecture.md` is non-normative.
+  model).
 - [`Docs/ExportAndRemoveDesign.md`](Docs/ExportAndRemoveDesign.md) --
   non-normative export/remove design notes.
 - [`Docs/TestingGuidance.md`](Docs/TestingGuidance.md) --
   non-normative guidance for stable diagnostics assertions.
-- [`Docs/Requirements.md`](Docs/Requirements.md) -- LGP-1 ... LGP-39
+- [`Docs/Requirements.md`](Docs/Requirements.md) -- LGP-1 … LGP-39
   requirements catalog with milestone status.
 - [`Docs/Decisions/`](Docs/Decisions) -- five ADRs (package split,
   envelope storage, file format, ordering, failure model).

@@ -1,3 +1,5 @@
+// swiftlint:disable file_length - Byte-stable export coverage centralizes destination-topology, atomicity, single-flight, byte-equality, and private-temp-directory confidentiality proofs in one suite for review locality.
+import Darwin
 import Foundation
 import LoggerPersistence
 import LoggerPersistenceTestSupport
@@ -18,7 +20,7 @@ struct FileLogStoreExportTests {
         )
     }
 
-    private static func makeStore(
+    private static func makeExportStore(
         directory: URL,
         rotation: RotationPolicy
     ) -> FileLogStore {
@@ -45,53 +47,31 @@ struct FileLogStoreExportTests {
         return (envelope, try CanonicalEnvelopeLineEncoder().encode(envelope))
     }
 
-    /// Bound on every semaphore wait the single-flight test
-    /// performs. Five seconds is generous for a fast unit test
-    /// while still preventing an indefinite hang when a test seam
-    /// is not released.
-    private static let singleFlightWaitTimeout: DispatchTimeInterval = .seconds(5)
+    /// Outer bound on the single-flight test's rendezvous
+    /// awaits. Fires only at the test boundary; never inside
+    /// an actor critical section.
+    private static let singleFlightRendezvousTimeout: Duration = .seconds(30)
 
     /// Installs the export-pause + append-entry + append-exit
-    /// test seams used by the single-flight test. The release
-    /// wait inside the export test seam is bounded so a missing
-    /// release signal fails the test deterministically instead
-    /// of hanging indefinitely.
+    /// test seams used by the single-flight test. The export
+    /// seam suspends asynchronously through the rendezvous
+    /// instead of blocking the cooperative pool.
     private static func wireSingleFlightTestSeams(
         on store: FileLogStore,
-        exportPaused: DispatchSemaphore,
-        releaseExport: DispatchSemaphore,
+        rendezvous: TestRendezvous,
         recorder: ActorActivityRecorder
     ) async {
         await store._setOnAfterWritingTemporaryBytesForTesting {
             recorder.record("export-paused")
-            exportPaused.signal()
-            let released = releaseExport.wait(
-                timeout: .now() + singleFlightWaitTimeout
-            ) == .success
-            recorder.record(released ? "export-released" : "export-release-timeout")
+            await rendezvous.signalPaused()
+            await rendezvous.awaitRelease()
+            recorder.record("export-released")
         }
         await store._setOnBeforeAppendForTesting {
             recorder.record("append-entered")
         }
         await store._setOnAfterAppendForTesting {
             recorder.record("append-completed")
-        }
-    }
-
-    /// Bridges a bounded `DispatchSemaphore.wait()`
-    /// into the async test body without blocking the test's
-    /// executor. Returns `true` on signal, `false` on timeout;
-    /// the test treats `false` as a recorded failure rather than
-    /// a hang.
-    private static func awaitSemaphoreWait(
-        _ semaphore: DispatchSemaphore,
-        timeout: DispatchTimeInterval
-    ) async -> Bool {
-        await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let waited = semaphore.wait(timeout: .now() + timeout) == .success
-                cont.resume(returning: waited)
-            }
         }
     }
 
@@ -122,7 +102,7 @@ extension FileLogStoreExportTests {
         let directory = Self.uniqueDirectory()
         try Self.makeDirectory(directory)
         defer { FileLogStoreTestSupport.remove(directory) }
-        let store = Self.makeStore(directory: directory, rotation: .never)
+        let store = Self.makeExportStore(directory: directory, rotation: .never)
 
         // One accepted line + interior-corrupt LF-terminated non-JSON.
         let envelope = try FileLogStoreTestSupport.makeEnvelope(
@@ -165,7 +145,7 @@ extension FileLogStoreExportTests {
         let directory = Self.uniqueDirectory()
         try Self.makeDirectory(directory)
         defer { FileLogStoreTestSupport.remove(directory) }
-        let store = Self.makeStore(directory: directory, rotation: .never)
+        let store = Self.makeExportStore(directory: directory, rotation: .never)
         _ = try await Self.appendCanonicalLines(store: store, sequences: 1 ... 1)
 
         let destinationParent = Self.uniqueDirectory()
@@ -175,9 +155,10 @@ extension FileLogStoreExportTests {
 
         // Plant a regular file at the final URL between final
         // pre-check and the atomic commit. Export is executing
-        // inside the actor-isolated operation, and the seam runs
-        // synchronously inside that operation, so this is the
-        // deterministic window where the race can be exercised.
+        // while holding the nonreentrant operation boundary, and
+        // the seam runs synchronously before the atomic commit,
+        // so this is the deterministic window where the race can
+        // be exercised.
         let plantedBytes = Data("PLANTED\n".utf8)
         let plantedPath = destination.path
         await store._setOnBeforeCommitForTesting {
@@ -216,7 +197,7 @@ extension FileLogStoreExportTests {
         let directory = Self.uniqueDirectory()
         try Self.makeDirectory(directory)
         defer { FileLogStoreTestSupport.remove(directory) }
-        let store = Self.makeStore(directory: directory, rotation: .never)
+        let store = Self.makeExportStore(directory: directory, rotation: .never)
         _ = try await Self.appendCanonicalLines(store: store, sequences: 1 ... 1)
 
         let destinationParent = Self.uniqueDirectory()
@@ -255,7 +236,7 @@ extension FileLogStoreExportTests {
         let directory = Self.uniqueDirectory()
         try Self.makeDirectory(directory)
         defer { FileLogStoreTestSupport.remove(directory) }
-        let store = Self.makeStore(directory: directory, rotation: .never)
+        let store = Self.makeExportStore(directory: directory, rotation: .never)
         _ = try await Self.appendCanonicalLines(store: store, sequences: 1 ... 1)
 
         let (destination, parent) = try Self.makeUniqueDestination()
@@ -293,7 +274,7 @@ extension FileLogStoreExportTests {
         let directory = Self.uniqueDirectory()
         try Self.makeDirectory(directory)
         defer { FileLogStoreTestSupport.remove(directory) }
-        let store = Self.makeStore(directory: directory, rotation: .never)
+        let store = Self.makeExportStore(directory: directory, rotation: .never)
 
         let destinationParent = Self.uniqueDirectory()
         try Self.makeDirectory(destinationParent)
@@ -313,7 +294,7 @@ extension FileLogStoreExportTests {
         let directory = Self.uniqueDirectory()
         try Self.makeDirectory(directory)
         defer { FileLogStoreTestSupport.remove(directory) }
-        let store = Self.makeStore(directory: directory, rotation: .never)
+        let store = Self.makeExportStore(directory: directory, rotation: .never)
         let expected = try await Self.appendCanonicalLines(
             store: store, sequences: 1 ... 1
         )
@@ -346,7 +327,7 @@ extension FileLogStoreExportTests {
         let policy = try RotationPolicy.bySize(
             maxSegmentBytes: FileLogStore.maxEncodedLineBytes
         )
-        let store = Self.makeStore(directory: directory, rotation: policy)
+        let store = Self.makeExportStore(directory: directory, rotation: policy)
 
         // Each large-payload envelope is roughly half the cap; two
         // appends fill segment 1, the third rolls into segment 2.
@@ -374,7 +355,7 @@ extension FileLogStoreExportTests {
         let directory = Self.uniqueDirectory()
         try Self.makeDirectory(directory)
         defer { FileLogStoreTestSupport.remove(directory) }
-        let store = Self.makeStore(directory: directory, rotation: .never)
+        let store = Self.makeExportStore(directory: directory, rotation: .never)
         let expected = try await Self.appendCanonicalLines(
             store: store, sequences: 1 ... 3
         )
@@ -408,7 +389,7 @@ extension FileLogStoreExportTests {
         let policy = try RotationPolicy.bySize(
             maxSegmentBytes: FileLogStore.maxEncodedLineBytes
         )
-        let store = Self.makeStore(directory: directory, rotation: policy)
+        let store = Self.makeExportStore(directory: directory, rotation: policy)
 
         // Append three envelopes; the third forces rotation. All
         // share `sequence == 1` to prove duplicates are passed
@@ -435,7 +416,7 @@ extension FileLogStoreExportTests {
         let directory = Self.uniqueDirectory()
         try Self.makeDirectory(directory)
         defer { FileLogStoreTestSupport.remove(directory) }
-        let store = Self.makeStore(directory: directory, rotation: .never)
+        let store = Self.makeExportStore(directory: directory, rotation: .never)
         let expected = try await Self.appendCanonicalLines(
             store: store, sequences: 1 ... 2
         )
@@ -452,6 +433,9 @@ extension FileLogStoreExportTests {
 // MARK: - Single-flight serialization
 
 extension FileLogStoreExportTests {
+    // swiftlint:disable function_body_length
+    // Reason: Async rendezvous + outer-timeout helpers wrap the locked single-flight assertion sequence per LGP-19/24/25/32.
+
     @Test(
         "Concurrent append cannot complete before export critical section releases",
         .tags(.lgp8, .lgp19, .lgp24, .lgp25, .lgp32)
@@ -460,7 +444,7 @@ extension FileLogStoreExportTests {
         let directory = Self.uniqueDirectory()
         try Self.makeDirectory(directory)
         defer { FileLogStoreTestSupport.remove(directory) }
-        let store = Self.makeStore(directory: directory, rotation: .never)
+        let store = Self.makeExportStore(directory: directory, rotation: .never)
         let expectedPrefix = try await Self.appendCanonicalLines(
             store: store, sequences: 1 ... 5
         )
@@ -469,57 +453,76 @@ extension FileLogStoreExportTests {
         let (destination, destinationParent) = try Self.makeUniqueDestination()
         defer { FileLogStoreTestSupport.remove(destinationParent) }
 
-        // Three synchronous signals drive the test:
-        // - exportPaused: signaled inside the export critical
-        //   section once the actor-isolated export operation is
-        //   executing; export then blocks on releaseExport.
-        // - appendCallPathReached: signaled by the append task
-        //   body immediately before `await store.append(...)`;
-        //   proves the call-path was reached before release, so
-        //   the test exercises concurrent export-against-append
-        //   rather than sequential after-release scheduling.
-        // - releaseExport: signaled by the test after the append
-        //   call-path has been reached; lets export finish.
+        // Two async rendezvous instances drive the test:
+        // - `exportRendezvous` pauses the export critical section
+        //   inside the post-write seam and releases it on the
+        //   test's command. The seam awaits on a continuation —
+        //   no cooperative-pool thread is blocked.
+        // - `appendStarted` proves the append task body has
+        //   begun executing before the test signals release, so
+        //   the proof exercises concurrent-against-export rather
+        //   than sequential after-release scheduling.
         //
         // The strict equality check on the recorded event order
-        // is the single-flight proof: append's actor-isolated
-        // interval (`append-entered` … `append-completed`) must
-        // sit entirely after `export-released` because the actor
-        // mutex queues the append call behind export.
-        let exportPaused = DispatchSemaphore(value: 0)
-        let appendCallPathReached = DispatchSemaphore(value: 0)
-        let releaseExport = DispatchSemaphore(value: 0)
+        // is the single-flight proof: append's body interval
+        // (`append-entered` … `append-completed`) must sit
+        // entirely after `export-released` because the operation
+        // boundary holds across export's await suspensions and
+        // queues the append call behind export.
+        let exportRendezvous = TestRendezvous()
+        let appendStarted = TestRendezvous()
         let recorder = ActorActivityRecorder()
         await Self.wireSingleFlightTestSeams(
-            on: store,
-            exportPaused: exportPaused,
-            releaseExport: releaseExport,
-            recorder: recorder
+            on: store, rendezvous: exportRendezvous, recorder: recorder
         )
 
-        let timeout = Self.singleFlightWaitTimeout
-        let exportTask = Task { try await store.exportLogs(to: destination) }
-        // Wait until export is inside the gate. Each wait is
-        // bounded; on timeout the test records a failure but
-        // still drains the tasks below so the suite cannot hang.
-        if !(await Self.awaitSemaphoreWait(exportPaused, timeout: timeout)) {
-            Issue.record("export did not reach pause gate within timeout")
-        }
+        // Failure-path cleanup: any throw between starting the
+        // first task and successfully draining both must release
+        // the rendezvous, cancel every started task, and
+        // bounded-drain task results so the test never leaves a
+        // paused holder behind or a queued waiter blocked on a
+        // non-cancelable operation boundary.
+        var exportTask: Task<Void, any Error>?
+        var appendTask: Task<Void, any Error>?
+        do {
+            exportTask = Task { try await store.exportLogs(to: destination) }
+            try await withTestTimeout(
+                Self.singleFlightRendezvousTimeout,
+                description: "export did not reach pause point"
+            ) {
+                await exportRendezvous.awaitPaused()
+            }
 
-        let appendTask = Task {
-            // Signal that the task body reached the call-path for
-            // `store.append`; the next instruction submits the
-            // actor call.
-            appendCallPathReached.signal()
-            try await store.append(extra)
-        }
-        if !(await Self.awaitSemaphoreWait(appendCallPathReached, timeout: timeout)) {
-            Issue.record("append task did not reach call-path within timeout")
-        }
+            appendTask = Task {
+                await appendStarted.signalPaused()
+                try await store.append(extra)
+            }
+            try await withTestTimeout(
+                Self.singleFlightRendezvousTimeout,
+                description: "append task body did not start"
+            ) {
+                await appendStarted.awaitPaused()
+            }
 
-        releaseExport.signal()
-        _ = try? await exportTask.value
-        _ = try? await appendTask.value
+            // Pre-release proof: append cannot have entered the
+            // operation body — the operation boundary is held by
+            // export. Recording any append event here would
+            // contradict the single-flight contract.
+            let preReleaseEvents = recorder.snapshot()
+            #expect(!preReleaseEvents.contains("append-entered"))
+            #expect(!preReleaseEvents.contains("append-completed"))
+
+            await exportRendezvous.signalRelease()
+            try await exportTask?.value
+            try await appendTask?.value
+        } catch {
+            await releaseCancelAndDrain(
+                rendezvous: exportRendezvous,
+                tasks: [exportTask, appendTask].compactMap(\.self),
+                context: "singleFlightAgainstConcurrentAppend"
+            )
+            throw error
+        }
         try await store.flush()
 
         let finalEvents = recorder.snapshot()
@@ -536,6 +539,147 @@ extension FileLogStoreExportTests {
             contentsOf: directory.appendingPathComponent("log.ndjson")
         )
         #expect(segmentBytes == expectedPrefix + extraLine)
+    }
+
+    // swiftlint:enable function_body_length
+}
+
+// MARK: - Private temp directory confidentiality
+
+extension FileLogStoreExportTests {
+    // swiftlint:disable function_body_length
+    // Reason: Pre-commit topology proof, sentinel-based umask-filtered final-mode comparison, and post-commit cleanup all live in one body to keep the private-temp-dir contract locally auditable.
+
+    @Test(
+        "Export confines payload bytes to a private temp directory; no readable temp file in destination parent",
+        .tags(.lgp8, .lgp24, .lgp25, .lgp32)
+    )
+    func exportConfinedToPrivateTempDirectory() async throws {
+        let directory = Self.uniqueDirectory()
+        try Self.makeDirectory(directory)
+        defer { FileLogStoreTestSupport.remove(directory) }
+        let store = Self.makeExportStore(directory: directory, rotation: .never)
+        _ = try await Self.appendCanonicalLines(
+            store: store, sequences: 1 ... 1
+        )
+        try await store.flush()
+        let (destination, destinationParent) = try Self.makeUniqueDestination()
+        defer { FileLogStoreTestSupport.remove(destinationParent) }
+
+        // Observe destination-parent topology during the
+        // pre-commit window: payload bytes must be inside the
+        // private temp directory, not as a readable regular
+        // temp file in the parent.
+        let observer = PrivateTempDirObserver()
+        let parentPath = destinationParent.path
+        await store._setOnBeforeCommitForTesting {
+            observer.observe(parentPath: parentPath)
+        }
+
+        try await store.exportLogs(to: destination)
+
+        let preCommit = observer.snapshot
+        // Exactly one entry in parent during write phase: the
+        // private temp directory.
+        #expect(preCommit.parentEntries.count == 1)
+        if let only = preCommit.parentEntries.first {
+            #expect(only.hasPrefix(".swift-logger-export-"))
+            #expect(only.hasSuffix(".tmpdir"))
+        }
+        // Private temp directory: directory type, owner-only mode.
+        #expect(preCommit.tempDirIsDirectory)
+        #expect(preCommit.tempDirMode == 0o700)
+        // No readable regular temp file in destination parent
+        // during the write phase.
+        #expect(preCommit.parentRegularFiles.isEmpty)
+
+        // Post-commit: final destination exists, private temp
+        // directory is gone.
+        #expect(FileManager.default.fileExists(atPath: destination.path))
+        let postEntries = try FileManager.default
+            .contentsOfDirectory(atPath: destinationParent.path)
+        let leftoverTempDirs = postEntries.filter {
+            $0.hasPrefix(".swift-logger-export-") && $0.hasSuffix(".tmpdir")
+        }
+        #expect(leftoverTempDirs.isEmpty)
+
+        // Final destination mode matches what the platform
+        // umask filters from `0o666`. Compute the expected mode
+        // by creating a sentinel file with the same `0o666` arg
+        // and reading its applied mode — avoids any
+        // `Darwin.umask(0)` lookup in the test path.
+        let sentinelURL = destinationParent
+            .appendingPathComponent("__umask-sentinel__")
+        let sentinelFD = sentinelURL.path.withCString { cPath in
+            Darwin.open(cPath, O_WRONLY | O_CREAT | O_TRUNC, 0o666)
+        }
+        try #require(sentinelFD >= 0)
+        var sentinelStat = stat()
+        let sentinelStatResult = Darwin.fstat(sentinelFD, &sentinelStat)
+        _ = Darwin.close(sentinelFD)
+        try? FileManager.default.removeItem(at: sentinelURL)
+        try #require(sentinelStatResult == 0)
+        let expectedMode = mode_t(sentinelStat.st_mode & 0o777)
+
+        var finalStat = stat()
+        let finalStatResult = destination.path.withCString { cPath in
+            Darwin.lstat(cPath, &finalStat)
+        }
+        try #require(finalStatResult == 0)
+        let actualMode = mode_t(finalStat.st_mode & 0o777)
+        #expect(actualMode == expectedMode)
+    }
+
+    // swiftlint:enable function_body_length
+
+    @Test(
+        "Export failure before commit removes private temp directory and payload",
+        .tags(.lgp8, .lgp24, .lgp25, .lgp32)
+    )
+    func exportFailureCleansUpPrivateTempDirectory() async throws {
+        struct SentinelError: Error {}
+
+        let directory = Self.uniqueDirectory()
+        try Self.makeDirectory(directory)
+        defer { FileLogStoreTestSupport.remove(directory) }
+        let store = Self.makeExportStore(directory: directory, rotation: .never)
+        _ = try await Self.appendCanonicalLines(
+            store: store, sequences: 1 ... 1
+        )
+        try await store.flush()
+        let (destination, destinationParent) = try Self.makeUniqueDestination()
+        defer { FileLogStoreTestSupport.remove(destinationParent) }
+
+        await store._setOnAfterWritingTemporaryBytesForTesting {
+            throw SentinelError()
+        }
+
+        do {
+            try await store.exportLogs(to: destination)
+            Issue.record("expected forced failure before commit")
+        } catch {
+            // The post-write seam projects onto
+            // `.operationFailed(.writeTemporaryDestinationBytes)`
+            // — asserting the specific projection prevents the
+            // cleanup proof below from masking an unrelated
+            // earlier failure.
+            switch error {
+            case let .operationFailed(operation, _, _):
+                #expect(operation == .writeTemporaryDestinationBytes)
+            default:
+                Issue.record(
+                    "expected .operationFailed(.writeTemporaryDestinationBytes), got \(error)"
+                )
+            }
+        }
+
+        // Failure path cleanup: no leftover private temp
+        // directory, no leftover payload, no final destination.
+        let entries = try FileManager.default
+            .contentsOfDirectory(atPath: destinationParent.path)
+        let leftover = entries.filter { $0.hasPrefix(".swift-logger-export-") }
+        #expect(leftover.isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: destination.path))
     }
 }
 
@@ -555,5 +699,50 @@ private final class ActorActivityRecorder: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return events
+    }
+}
+
+private final class PrivateTempDirObserver: @unchecked Sendable {
+    struct Snapshot: Sendable {
+        var parentEntries: [String] = []
+        var parentRegularFiles: [String] = []
+        var tempDirMode: mode_t = 0
+        var tempDirIsDirectory: Bool = false
+    }
+
+    private let lock = NSLock()
+    private var current = Snapshot()
+
+    var snapshot: Snapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return current
+    }
+
+    func observe(parentPath: String) {
+        let parentURL = URL(fileURLWithPath: parentPath)
+        guard let entries = try? FileManager.default
+            .contentsOfDirectory(at: parentURL, includingPropertiesForKeys: nil)
+        else { return }
+        var snapshot = Snapshot()
+        snapshot.parentEntries = entries.map(\.lastPathComponent)
+        for entry in entries {
+            var statBuf = stat()
+            let result = entry.path.withCString { cPath in
+                Darwin.lstat(cPath, &statBuf)
+            }
+            guard result == 0 else { continue }
+            let kind = statBuf.st_mode & S_IFMT
+            if kind == S_IFDIR, entry.lastPathComponent.hasSuffix(".tmpdir") {
+                snapshot.tempDirMode = mode_t(statBuf.st_mode & 0o777)
+                snapshot.tempDirIsDirectory = true
+            }
+            if kind == S_IFREG {
+                snapshot.parentRegularFiles.append(entry.lastPathComponent)
+            }
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        current = snapshot
     }
 }

@@ -1,3 +1,4 @@
+// swiftlint:disable file_length - Active-segment and pending-close mutators must live in the same file as the `private` storage so cross-file paths cannot bypass the actor's narrow operation-level contract.
 import Darwin
 import Foundation
 import LoggerPersistence
@@ -22,46 +23,72 @@ public actor FileLogStore: PersistentLogStore {
     private static let rotatedSegmentSequenceWidth = 6
 
     /// Module-internal so the export extension in a sibling file
-    /// can resolve the configured root path under the same actor
-    /// mutex.
+    /// can resolve the configured root path without exposing
+    /// configuration as public API.
     internal let configuration: Configuration
     private let lineEncoder = CanonicalEnvelopeLineEncoder()
+    /// Active writable segment. `private` so cross-file remove,
+    /// export, and test-seam paths must go through the narrow
+    /// operation-level helpers defined on this actor (e.g.
+    /// ``resetActiveSegmentAfterFullPrefixRemoval(url:)``,
+    /// ``reopenActiveSegmentAfterCompaction(at:sequence:)``,
+    /// ``invalidateActiveWriterAfterFailedPostMutation()``,
+    /// ``isActiveSegment(at:)``) rather than mutate raw state.
     private var activeSegment: ActiveSegment?
     /// Held configured-root descriptor. Opened once on the first
     /// admit and reused for every subsequent segment open / rotation
     /// so a path-component swap of `configuration.directory` after
     /// the descriptor is held cannot redirect writes to a different
     /// real directory. Module-internal so the export extension in a
-    /// sibling file can borrow it under the same actor mutex.
+    /// sibling file can borrow it under actor isolation.
     internal var writerRoot: SegmentRoot?
     /// Handles whose `close()` failed during a rotation transition.
     /// Retained on the actor so a transient close failure does not
     /// orphan a file descriptor; drained on each later admit/flush
-    /// boundary and on `deinit` as a best-effort retry.
+    /// boundary and on `deinit` as a best-effort retry. `private`
+    /// so cross-file callers route appends through
+    /// ``retainPendingCloseHandle(_:)`` rather than mutate the
+    /// queue directly.
     private var pendingCloseHandles: [FileHandle] = []
+    /// In-memory removal boundary captured by the most recent
+    /// successful `exportLogs(to:)`. `nil` means no removable
+    /// prefix exists; `removeExportedLogs()` then fails with
+    /// `.noExportedRemovalBoundary`. Module-internal so the
+    /// export and remove extensions in sibling files can read
+    /// and update it under actor isolation.
+    internal var removalBoundary: RemovalBoundary?
+    /// Nonreentrant boundary held across every `await` inside
+    /// `append`, `flush`, `exportLogs(to:)`, and
+    /// `removeExportedLogs()`. Closes the actor-reentrancy
+    /// window so a body suspension (including an awaiting test
+    /// seam) cannot let another operation interleave the
+    /// in-flight one's critical section. Module-internal so
+    /// the export and remove extensions in sibling files can
+    /// hold it under actor isolation.
+    internal let operationBoundary = OperationBoundary()
 
     /// TEST-ONLY hook fired before each `openSegmentForWriting`
     /// call (initial open and rotation) once the held writer root
     /// is in hand. Lets tests deterministically race a path-swap
     /// against `openat(rootFD, ...)`. A throw surfaces as
     /// `.operationFailed(.openWritableSegment)`.
-    private var onBeforeOpenWritableSegmentForTesting: (@Sendable () throws -> Void)?
+    internal var onBeforeOpenWritableSegmentForTesting: (@Sendable () throws -> Void)?
 
     /// TEST-ONLY hook fired between the post-create root
     /// `lstat(2)` snapshot and the descriptor open. Lets tests
     /// deterministically race a path-component swap against
     /// `SegmentRoot.open` so the post-open identity check sees a
     /// different inode and rejects.
-    private var onBeforeWriterRootOpenForTesting: (@Sendable () throws -> Void)?
+    internal var onBeforeWriterRootOpenForTesting: (@Sendable () throws -> Void)?
 
     /// TEST-ONLY hook fired by the export critical section after
     /// all segment bytes have been written to the temp file but
     /// before `fsync(temp)`. Lets tests inject a write-failure
     /// equivalent so the cleanup contract can be exercised
     /// without a filesystem-level fault. Module-internal so the
-    /// export extension in a sibling file can read it under the
-    /// same actor mutex.
-    internal var onAfterWritingTemporaryBytesForTesting: (@Sendable () throws -> Void)?
+    /// export extension in a sibling file can read it under
+    /// actor isolation.
+    internal var onAfterWritingTemporaryBytesForTesting: (@Sendable () async throws -> Void)?
 
     /// TEST-ONLY hook fired by the export critical section after
     /// the temp file has been closed and immediately before the
@@ -80,12 +107,12 @@ public actor FileLogStore: PersistentLogStore {
     internal var onAfterAppendForTesting: (@Sendable () -> Void)?
 
     /// TEST-ONLY hook fired at the very first instruction of
-    /// `append`, after the call has acquired the actor mutex but
-    /// before any work runs. Combined with
+    /// `append`, after the call has acquired the operation
+    /// boundary but before any append work runs. Combined with
     /// ``onAfterAppendForTesting`` this lets tests record an
     /// `[append-entered, append-completed]` interval that the
-    /// actor mutex guarantees never overlaps an export's gate
-    /// interval.
+    /// nonreentrant operation boundary guarantees never overlaps
+    /// an export's gate interval.
     internal var onBeforeAppendForTesting: (@Sendable () -> Void)?
 
     /// TEST-ONLY hook fired at the start of
@@ -95,6 +122,40 @@ public actor FileLogStore: PersistentLogStore {
     /// descriptor is best-effort closed before the hook's error
     /// is projected onto `.closeTemporaryDestination`.
     internal var onCloseTemporaryDestinationForTesting: (@Sendable () throws -> Void)?
+
+    /// TEST-ONLY async rendezvous hook fired before each
+    /// per-entry removal mutation, after `removeExportedLogs()`
+    /// has acquired the operation boundary. Receives the entry
+    /// URL. Tests may suspend here to prove concurrent append/export
+    /// callers cannot cross the nonreentrant operation boundary, or
+    /// throw to simulate a removal step failure deterministically.
+    internal var onBeforeProcessRemovalEntryForTesting: (@Sendable (URL) async throws -> Void)?
+
+    /// TEST-ONLY hook fired between the destructive
+    /// segment-mutation step and the active-writer reopen
+    /// step. A throw simulates a reopen failure that must
+    /// surface to the caller while leaving the destructive
+    /// mutation already advanced past the entry in the
+    /// boundary tail.
+    internal var onBeforeReopenActiveSegmentForTesting: (@Sendable (URL) throws -> Void)?
+
+    /// TEST-ONLY hook fired immediately before the compaction
+    /// read descriptor is opened, after the per-entry
+    /// revalidation step has succeeded. Lets tests mutate the
+    /// boundary segment in the narrow window between per-entry
+    /// revalidation and compaction-read revalidation so the
+    /// inside-`compactSegment` re-check fails closed with
+    /// `.removalBoundaryStale` and no compaction temp is left
+    /// behind.
+    internal var onBeforeOpenCompactionReadForTesting: (@Sendable (URL) throws -> Void)?
+
+    /// TEST-ONLY classification seam for stale-boundary rotated-topology
+    /// validation. When non-nil, the override bypasses real
+    /// descriptor-relative rotated-segment traversal and injects a
+    /// synthetic `InternalReadError` classification so tests can
+    /// deterministically exercise stale-boundary dispatch paths
+    /// without constructing matching on-disk topology.
+    internal var rotatedTopologyOverrideForTesting: (@Sendable () -> InternalReadError?)?
 
     /// Creates a file-backed store.
     ///
@@ -120,8 +181,8 @@ public actor FileLogStore: PersistentLogStore {
     /// by the next line, the store rotates to the next segment.
     /// The append is preserved as exactly one accepted line in
     /// exactly one segment; rotation never splits a line across
-    /// segments per `Docs/FileFormatSpec.md` ("Append Rotation
-    /// Interaction").
+    /// segments per the file-format specification ("Append
+    /// Rotation Interaction").
     ///
     /// - Throws: ``FileLogStoreError`` on file-system failure,
     ///   pre-admission validation failure, or implementation
@@ -131,6 +192,12 @@ public actor FileLogStore: PersistentLogStore {
     public func append(
         _ envelope: PersistentLogEnvelope
     ) async throws(FileLogStoreError) {
+        let lease = await operationBoundary.enter()
+        // Production-balanced enter/exit always matches, so
+        // the result is discarded here; `defer` has no
+        // practical throwing path. The mismatch contract is
+        // pinned by `OperationBoundary` unit coverage.
+        defer { _ = operationBoundary.exit(lease) }
         onBeforeAppendForTesting?()
         drainPendingCloseHandles()
         let lineBytes = try canonicalLineBytes(for: envelope)
@@ -148,12 +215,8 @@ public actor FileLogStore: PersistentLogStore {
             active.size += UInt64(lineBytes.count)
             activeSegment = active
         } catch {
-            // The handle's offset and the segment's tail are now
-            // in an undefined state: the underlying write may have
-            // committed a partial prefix before failing. Discard
-            // the active segment so the next admit reopens through
-            // the suffix-trim path, which truncates any trailing
-            // non-LF bytes before admitting a fresh line.
+            // Write failure leaves the active segment state undefined; the next
+            // admit must reopen through recoverable-prefix trimming.
             do {
                 try active.handle.close()
             } catch {
@@ -170,8 +233,8 @@ public actor FileLogStore: PersistentLogStore {
     }
 
     /// Verifies the encoded line ends with the canonical trailing
-    /// LF per `Docs/FileFormatSpec.md` ("Implementation Invariant
-    /// Diagnostics"). Safe to run before the encoded-line size cap.
+    /// LF per the file-format specification. Safe to run before
+    /// the encoded-line size cap.
     static func validateTrailingLF(
         _ bytes: Data
     ) throws(FileLogStoreError) {
@@ -197,6 +260,12 @@ public actor FileLogStore: PersistentLogStore {
 
     /// Best-effort local synchronization boundary for accepted appends.
     public func flush() async throws(FileLogStoreError) {
+        let lease = await operationBoundary.enter()
+        // Production-balanced enter/exit always matches, so
+        // the result is discarded here; `defer` has no
+        // practical throwing path. The mismatch contract is
+        // pinned by `OperationBoundary` unit coverage.
+        defer { _ = operationBoundary.exit(lease) }
         drainPendingCloseHandles()
         guard let active = activeSegment else { return }
         do {
@@ -295,9 +364,8 @@ public actor FileLogStore: PersistentLogStore {
         let root = try ensureWriterRoot()
         let url = rotatedSegmentURL(sequence: nextSequence)
         // Activate the next segment before closing the previous
-        // handle; close failures are retained for retry. The next
-        // segment opens through the same held descriptor as the
-        // previous one — rotation does not re-resolve the path.
+        // handle. Rotation continues through the held root descriptor;
+        // close failures are retained for deferred close.
         let next = try openNewSegment(root: root, url: url, sequence: nextSequence)
         activeSegment = next
         do {
@@ -534,7 +602,7 @@ extension FileLogStore {
 
     /// Module-internal so the export extension in a sibling file
     /// can flush pending closes at the start of an export under
-    /// the same actor mutex.
+    /// actor isolation.
     internal func drainPendingCloseHandles() {
         guard !pendingCloseHandles.isEmpty else { return }
         let handles = pendingCloseHandles
@@ -552,7 +620,7 @@ extension FileLogStore {
 
 extension FileLogStore {
     /// Active writable segment.
-    fileprivate struct ActiveSegment {
+    internal struct ActiveSegment {
         let handle: FileHandle
         let url: URL
         /// Rotated-segment sequence; `nil` under `.never`.
@@ -582,26 +650,203 @@ extension FileLogStore {
     }
 }
 
-// MARK: - TEST-ONLY
+// MARK: - Pending-close discipline
 
-internal enum TestSeamFailure: Error, Sendable {
-    case noActiveSegment
-    case handleAlreadyPendingClose
+extension FileLogStore {
+    /// Retains `handle` for deferred close and best-effort
+    /// retry at the next admit/flush/export/remove boundary.
+    /// Cross-file paths that observe a `close()` failure must
+    /// route through this entry point so the deferred-close
+    /// queue is mutated only via the actor's narrow contract.
+    internal func retainPendingCloseHandle(_ handle: FileHandle) {
+        pendingCloseHandles.append(handle)
+    }
 }
 
-// TEST-ONLY failure-injection seams.
+// MARK: - Active-segment narrow operations
+
+extension FileLogStore {
+    /// Returns whether the active segment's URL matches `url`.
+    /// Lets removal pathways branch on active vs. rotated
+    /// segments without exposing raw active-segment state.
+    internal func isActiveSegment(at url: URL) -> Bool {
+        activeSegment?.url == url
+    }
+
+    /// Destructive step of the active fully-exported reset
+    /// path: resets the active writer's segment so it preserves
+    /// no accepted bytes before the removal boundary, and
+    /// updates the `size` invariant to match the new on-disk
+    /// state. Writer-offset alignment is a separate step
+    /// (``resetActiveWriterOffsetAfterReset``) so the
+    /// boundary tail can advance past the entry once the
+    /// destructive step completes.
+    internal func resetActiveSegmentAfterFullPrefixRemoval(
+        url: URL
+    ) throws(FileLogStoreRemoveError) {
+        guard let active = activeSegment, active.url == url else {
+            return
+        }
+        let descriptor = active.handle.fileDescriptor
+        if Darwin.ftruncate(descriptor, 0) != 0 {
+            let savedErrno = errno
+            throw .operationFailed(
+                operation: .reopenActiveSegment,
+                url: url,
+                context: FileSystemErrorContext(
+                    domain: NSPOSIXErrorDomain,
+                    code: Int(savedErrno),
+                    description: "active segment reset failed"
+                )
+            )
+        }
+        // Even if the subsequent writer-offset reset fails,
+        // the actor's `size` invariant must reflect the
+        // reset on-disk state.
+        activeSegment = ActiveSegment(
+            handle: active.handle,
+            url: active.url,
+            sequence: active.sequence,
+            size: 0
+        )
+    }
+
+    /// Writer-offset-alignment step that pairs with the
+    /// active-segment reset. Repositions the writer FD to the
+    /// active-segment reset append boundary after the active
+    /// segment was reset; failure here surfaces to the caller
+    /// while the destructive step has already advanced the
+    /// boundary tail past the entry.
+    internal func resetActiveWriterOffsetAfterReset(
+        url: URL
+    ) throws(FileLogStoreRemoveError) {
+        guard let active = activeSegment, active.url == url else {
+            return
+        }
+        let descriptor = active.handle.fileDescriptor
+        if Darwin.lseek(descriptor, 0, SEEK_SET) < 0 {
+            let savedErrno = errno
+            throw .operationFailed(
+                operation: .reopenActiveSegment,
+                url: url,
+                context: FileSystemErrorContext(
+                    domain: NSPOSIXErrorDomain,
+                    code: Int(savedErrno),
+                    description: "active writer offset reset failed"
+                )
+            )
+        }
+    }
+
+    /// Invalidates the active writer after a post-mutation
+    /// failure. Covers both destructive paths:
+    ///
+    /// - **active-segment reset:** the segment was truncated on
+    ///   disk but the writer's offset still points past the
+    ///   reset boundary; a subsequent append could resume from
+    ///   the stale offset and create a sparse gap.
+    /// - **compaction atomic replacement:** the segment at the
+    ///   boundary path was replaced by `renameat`, so the
+    ///   writer's open handle now references a detached inode;
+    ///   a subsequent append could land in the unlinked-but-
+    ///   still-referenced inode instead of the on-disk
+    ///   compacted segment.
+    ///
+    /// Drops the active segment and routes the handle through
+    /// the deferred-close discipline so the next append re-opens
+    /// fresh on the current on-disk path.
+    internal func invalidateActiveWriterAfterFailedPostMutation() {
+        guard let stale = activeSegment else { return }
+        activeSegment = nil
+        do {
+            try stale.handle.close()
+        } catch {
+            pendingCloseHandles.append(stale.handle)
+        }
+    }
+
+    /// Closes the stale active writer handle, which referenced
+    /// the old on-disk segment after atomic replacement,
+    /// and reopens the writer descriptor on the compacted
+    /// path, positioning at the compacted segment's end.
+    internal func reopenActiveSegmentAfterCompaction(
+        at url: URL,
+        sequence: UInt64?
+    ) throws(FileLogStoreRemoveError) {
+        guard let active = activeSegment, active.url == url else {
+            return
+        }
+        let oldHandle = active.handle
+        activeSegment = nil
+        do {
+            try oldHandle.close()
+        } catch {
+            pendingCloseHandles.append(oldHandle)
+        }
+        guard let root = writerRoot else {
+            throw .operationFailed(
+                operation: .reopenActiveSegment,
+                url: url,
+                context: FileSystemErrorContext(
+                    domain: FileSystemErrorContext.packageDomain,
+                    code: nil,
+                    description: "writerRoot missing during reopen"
+                )
+            )
+        }
+        let newHandle: FileHandle
+        do {
+            newHandle = try root.openSegmentForWriting(url: url)
+        } catch {
+            throw .operationFailed(
+                operation: .reopenActiveSegment,
+                url: url,
+                context: FileSystemErrorContext(from: error)
+            )
+        }
+        let position: UInt64
+        do {
+            position = try newHandle.seekToEnd()
+        } catch {
+            // Preserve undefined-state close handling through the
+            // deferred-close queue.
+            do { try newHandle.close() } catch { pendingCloseHandles.append(newHandle) }
+            throw .operationFailed(
+                operation: .reopenActiveSegment,
+                url: url,
+                context: FileSystemErrorContext(from: error)
+            )
+        }
+        activeSegment = ActiveSegment(
+            handle: newHandle,
+            url: url,
+            sequence: sequence,
+            size: position
+        )
+    }
+}
+
+// MARK: - TEST-ONLY active-segment / pending-close mutators
+
+//
+// These live alongside the actor's storage so the storage can
+// stay `private`. Sibling test-seam files install closures into
+// `var on…ForTesting` properties; the helpers below are the
+// only narrow mutators that observe or modify the private
+// `activeSegment` / `pendingCloseHandles` state.
+
 extension FileLogStore {
     // swiftlint:disable identifier_name
 
-    /// TEST-ONLY: closes the active handle and clears `activeSegment`.
-    /// Failed close is retained for retry.
-    ///
-    /// Invariant: active handle must not already be pending close.
+    /// TEST-ONLY: closes the active handle and clears
+    /// `activeSegment`. Failed close is retained for deferred
+    /// close. Invariant: active handle must not already be
+    /// pending close.
     internal func _forceCloseActiveHandleForTesting() throws {
         guard let active = activeSegment else {
             throw TestSeamFailure.noActiveSegment
         }
-        try ensureHandleNotPendingCloseForTesting(active.handle)
+        try _ensureHandleNotPendingCloseForTesting(active.handle)
         do {
             try active.handle.close()
             activeSegment = nil
@@ -612,15 +857,15 @@ extension FileLogStore {
         }
     }
 
-    /// TEST-ONLY: leaves `activeSegment` pointing at a closed handle.
-    ///
-    /// Invariant: active handle must not already be pending close.
+    /// TEST-ONLY: leaves `activeSegment` pointing at a closed
+    /// handle. Invariant: active handle must not already be
+    /// pending close.
     internal func _forceCloseActiveHandleLeavingInvalidReferenceForTesting() throws {
         guard let active = activeSegment else {
             throw TestSeamFailure.noActiveSegment
         }
         let handle = active.handle
-        try ensureHandleNotPendingCloseForTesting(handle)
+        try _ensureHandleNotPendingCloseForTesting(handle)
         try handle.close()
         activeSegment = ActiveSegment(
             handle: handle,
@@ -630,10 +875,11 @@ extension FileLogStore {
         )
     }
 
-    /// TEST-ONLY: injects a handle into the pending-close retry queue.
-    /// The handle must not already be present in the queue.
+    /// TEST-ONLY: injects a handle into the pending-close retry
+    /// queue. The handle must not already be present in the
+    /// queue.
     internal func _injectPendingCloseHandleForTesting(_ handle: FileHandle) throws {
-        try ensureHandleNotPendingCloseForTesting(handle)
+        try _ensureHandleNotPendingCloseForTesting(handle)
         pendingCloseHandles.append(handle)
     }
 
@@ -641,79 +887,7 @@ extension FileLogStore {
         pendingCloseHandles.count
     }
 
-    /// TEST-ONLY: installs a hook that fires immediately before each
-    /// `openSegmentForWriting` call (initial open and rotation) once
-    /// the held writer root is in hand. A throw from the hook is
-    /// projected onto `.openWritableSegment`.
-    internal func _setOnBeforeOpenWritableSegmentForTesting(
-        _ hook: (@Sendable () throws -> Void)?
-    ) {
-        onBeforeOpenWritableSegmentForTesting = hook
-    }
-
-    /// TEST-ONLY: installs a hook that fires between the post-create
-    /// root `lstat` snapshot and the `SegmentRoot.open` call. A
-    /// throw from the hook is projected onto `.openWritableSegment`.
-    internal func _setOnBeforeWriterRootOpenForTesting(
-        _ hook: (@Sendable () throws -> Void)?
-    ) {
-        onBeforeWriterRootOpenForTesting = hook
-    }
-
-    /// TEST-ONLY: installs a hook that fires inside the export
-    /// critical section after all segment bytes have been written
-    /// to the temp file but before `fsync(temp)`. A throw from the
-    /// hook is projected onto
-    /// `.writeTemporaryDestinationBytes` so cleanup can be
-    /// asserted without a real write fault.
-    internal func _setOnAfterWritingTemporaryBytesForTesting(
-        _ hook: (@Sendable () throws -> Void)?
-    ) {
-        onAfterWritingTemporaryBytesForTesting = hook
-    }
-
-    /// TEST-ONLY: installs a hook fired inside the export critical
-    /// section after the temp file is closed and immediately
-    /// before the atomic commit, used to plant a destination
-    /// entry between final pre-check and `renameatx_np`. A throw
-    /// projects to `.operationFailed(.commitDestination)`.
-    internal func _setOnBeforeCommitForTesting(
-        _ hook: (@Sendable () throws -> Void)?
-    ) {
-        onBeforeCommitForTesting = hook
-    }
-
-    /// TEST-ONLY: installs a hook fired at the end of `append`
-    /// after admitted bytes reach the active segment. Used to
-    /// observe append completion ordering against export.
-    internal func _setOnAfterAppendForTesting(
-        _ hook: (@Sendable () -> Void)?
-    ) {
-        onAfterAppendForTesting = hook
-    }
-
-    /// TEST-ONLY: installs a hook fired at the first instruction
-    /// of `append`, immediately after the call acquires the actor
-    /// mutex. Pairs with `_setOnAfterAppendForTesting` to record
-    /// the actor-isolated interval for single-flight proofs.
-    internal func _setOnBeforeAppendForTesting(
-        _ hook: (@Sendable () -> Void)?
-    ) {
-        onBeforeAppendForTesting = hook
-    }
-
-    /// TEST-ONLY: installs a hook that simulates a `close(2)`
-    /// failure on the export temporary file. A throw projects to
-    /// `.operationFailed(.closeTemporaryDestination)`; the
-    /// descriptor is best-effort closed so the test does not
-    /// leak.
-    internal func _setOnCloseTemporaryDestinationForTesting(
-        _ hook: (@Sendable () throws -> Void)?
-    ) {
-        onCloseTemporaryDestinationForTesting = hook
-    }
-
-    private func ensureHandleNotPendingCloseForTesting(_ handle: FileHandle) throws {
+    private func _ensureHandleNotPendingCloseForTesting(_ handle: FileHandle) throws {
         guard !pendingCloseHandles.contains(where: { $0 === handle }) else {
             throw TestSeamFailure.handleAlreadyPendingClose
         }

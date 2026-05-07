@@ -53,6 +53,14 @@ internal struct AcceptedLineSequence: AsyncSequence {
         private var currentScanner: RecoverablePrefixScanner.Iterator?
         private var terminated: Bool
         private var aggregateChunkReads: Int
+        /// Iterator-local deferred-close queue for per-segment
+        /// read handles. Mirrors the actor's
+        /// `pendingCloseHandles` discipline for non-actor-owned
+        /// reader paths: a transient `close(2)` failure is
+        /// retained and retried at the next iterator boundary
+        /// (advance, terminate, deinit) instead of being
+        /// silently dropped.
+        private var pendingCloseHandles: [FileHandle]
 
         /// Total non-empty chunk reads observed across every
         /// segment's scanner. Used by tests to verify pull-based
@@ -81,10 +89,12 @@ internal struct AcceptedLineSequence: AsyncSequence {
             currentScanner = nil
             terminated = false
             aggregateChunkReads = 0
+            pendingCloseHandles = []
         }
 
         deinit {
             releaseCurrentSegment()
+            drainPendingCloseHandles()
             root?.close()
         }
 
@@ -190,6 +200,10 @@ internal struct AcceptedLineSequence: AsyncSequence {
                 terminate()
                 return false
             }
+            // Retry deferred-close handles before taking on a new
+            // segment; the previous segment's failed close is given
+            // one more chance at this iterator boundary.
+            drainPendingCloseHandles()
             let url = urls[nextSegmentIndex]
             nextSegmentIndex += 1
             currentSegmentURL = url
@@ -230,7 +244,9 @@ internal struct AcceptedLineSequence: AsyncSequence {
                 aggregateChunkReads += scanner.chunkReadCountForTesting
             }
             currentScanner = nil
-            try? currentHandle?.close()
+            if let handle = currentHandle {
+                closeCurrentHandleForDeferredCleanup(handle)
+            }
             currentHandle = nil
             currentSegmentURL = nil
             if hadOpenSegment {
@@ -238,8 +254,37 @@ internal struct AcceptedLineSequence: AsyncSequence {
             }
         }
 
+        /// Closes the per-segment read handle. Close failure
+        /// retains the handle in the iterator-local queue so
+        /// the failure is not silently dropped between segments.
+        private func closeCurrentHandleForDeferredCleanup(_ handle: FileHandle) {
+            do {
+                try handle.close()
+            } catch {
+                pendingCloseHandles.append(handle)
+            }
+        }
+
+        /// Retries every pending-close handle once. Handles
+        /// whose retry still fails stay queued for the next
+        /// boundary; on `deinit` the leftover queue is dropped
+        /// as the final best-effort attempt.
+        private func drainPendingCloseHandles() {
+            guard !pendingCloseHandles.isEmpty else { return }
+            let handles = pendingCloseHandles
+            pendingCloseHandles = []
+            for handle in handles {
+                do {
+                    try handle.close()
+                } catch {
+                    pendingCloseHandles.append(handle)
+                }
+            }
+        }
+
         private func terminate() {
             releaseCurrentSegment()
+            drainPendingCloseHandles()
             root?.close()
             root = nil
             terminated = true
