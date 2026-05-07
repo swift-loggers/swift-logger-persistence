@@ -173,11 +173,79 @@ Error guarantees:
 - Invariant failures report implementation defects, not caller
   validation failures.
 
-## Future shape (deferred -- not in M3.3.0)
+## Byte-stable export -- M3.3.2
+
+`FileLogStore` exposes a single concrete export method. Per-protocol
+shape (`ExportableLogStore` with `removeExportedLogs()`) is deferred
+because adding a protocol requirement after release would be a public
+API break; the protocol lands together with the destructive
+`removeExportedLogs()` lifecycle in a later milestone.
+
+```swift
+extension FileLogStore {
+    public func exportLogs(
+        to url: URL
+    ) async throws(FileLogStoreExportError)
+}
+```
+
+Public error surface lives in
+`Sources/LoggerFilePersistence/FileLogStoreExportError.swift`:
+
+- `FileLogStoreExportError.operationFailed(operation:url:context:)`
+- `FileLogStoreExportError.interiorCorruption(segmentURL:byteOffset:classification:)`
+- `FileLogStoreExportError.invalidDestination(reason:)`
+
+The public `FileLogStoreExportCorruptionClass` taxonomy is part of
+the file-store export compatibility contract. Adding a new internal
+classification requires a public addition before it can be projected.
+
+Serialization semantics:
+
+- The actor executes `exportLogs(to:)` without interleaving
+  `append`, `flush`, or rotation. Export discovery and export
+  writes execute within the same actor-isolated operation;
+  concurrent callers wait for actor-isolated execution.
+- `exportLogs(to:)` does not call `flush()` implicitly. Recoverable
+  visibility is the durability boundary. Callers that want
+  export-after-flush call `flush()` themselves.
+- Bytes outside a segment's recoverable prefix are never exported.
+
+Atomicity contract:
+
+- Any pre-existing entry at the destination URL yields
+  `.invalidDestination(reason:)`; the destination is not modified.
+- Export writes to a unique temporary file in the destination parent
+  directory using no-overwrite creation semantics.
+- The temporary file's contents are made durable before the commit.
+- Final commit is atomic and must not overwrite an existing
+  destination.
+- Directory-entry durability after commit is best-effort.
+- On any failure between create and commit the export attempts
+  temporary-file cleanup. The export never creates partial final bytes
+  and never overwrites a destination that materializes concurrently.
+
+Bytes contract:
+
+- Export output is the concatenation of accepted bytes from
+  discovered segments in accepted ordering (`.never` →
+  `log.ndjson`; `.bySize` → rotated segments ascending by
+  numeric sequence).
+- Accepted bytes are preserved byte-for-byte from each segment's
+  recoverable prefix in accepted ordering. No decoding,
+  re-encoding, canonicalization, or extra LF/footer occurs.
+- Empty recoverable prefix → 0-byte file at the destination,
+  success.
+- Interior corruption mid-scan aborts before commit; the export
+  creates no final URL and attempts temp cleanup.
+- Duplicate `sequence` values are preserved verbatim; logical
+  duplicate detection is a separate future API.
+
+## Future shape (deferred -- not in M3.3.2)
 
 Deferred non-normative sketches.
 
-### Export and remove
+### Export and remove protocol
 
 ```text
 public protocol ExportableLogStore: Sendable {
@@ -185,6 +253,10 @@ public protocol ExportableLogStore: Sendable {
     func removeExportedLogs() async throws
 }
 ```
+
+`exportLogs(to:)` will conform `FileLogStore` to this protocol when
+`removeExportedLogs()` lands; the public method signature stays
+compatible.
 
 ### Rotation and retention
 

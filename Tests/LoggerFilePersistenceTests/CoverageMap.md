@@ -28,7 +28,7 @@ Docs/Requirements.md owns requirement IDs.
 | Accepted-line iteration | LGP-14, LGP-15, LGP-19, LGP-27, LGP-30 | Covered | `AcceptedLineIteratorTests.swift`, `AcceptedLineIteratorMidChainPartialTests.swift`, `AcceptedLineIteratorPullStreamingTests.swift`, `AcceptedLineIteratorCancellationTests.swift`, `RecoverablePrefixScannerTests.swift`, `RecoveryDiscoverySQECoverage.md` |
 | Corpus-governed corruption classification | LGP-33, LGP-34, LGP-35, LGP-36, LGP-37 | Covered | `RecoveryDiscoverySQECoverage.md`, `Fixtures/Corpus/` |
 | Retention/removal | LGP-7, LGP-9 | Future scope | Not expected in M3.3.2 |
-| Byte-stable export API | LGP-8, LGP-32 | Future scope | Not expected in M3.3.2 |
+| Byte-stable export API | LGP-8, LGP-14, LGP-15, LGP-16, LGP-17, LGP-32 | Covered | `FileLogStoreExportTests.swift`, `FileLogStoreExportDestinationTests.swift`, `FileLogStoreExportRotatedTests.swift`, `ByteStableExportSQECoverage.md` |
 | Logical export API | LGP-32 | Future scope | Not expected in M3.3.2 |
 
 ## Implementation File Index
@@ -43,10 +43,14 @@ remains the review entry point.
 | `CanonicalEnvelopeLineEncoder.swift` | Canonical envelope-line encoding, delimiter ownership, encoded-line byte shape | `CanonicalEnvelopeLineEncoderTests.swift`, `FileLogStoreTests.swift` |
 | `EnvelopeLineClassifier.swift` | Read-side envelope validation and corruption classification | `RecoverablePrefixScannerTests.swift`, `CorpusRecoveryTests.swift` |
 | `FileLogStore.swift` | Append/write path, flush, rotation, reopen, trailing-suffix handling, lifecycle seams, descriptor-relative writer opens | `FileLogStoreTests.swift`, `FileLogStoreRotationTests.swift`, `FileLogStoreReopenTests.swift`, `FileLogStoreReopenDuplicateTests.swift`, `FileLogStoreWriterMidScanTOCTOUTests.swift`, `FileLogStoreWriterSymlinkTests.swift` |
+| `FileLogStoreExport.swift` | Byte-stable export surface, atomic no-overwrite destination commit, export serialization, descriptor-relative segment read | `FileLogStoreExportTests.swift`, `FileLogStoreExportDestinationTests.swift`, `FileLogStoreExportRotatedTests.swift`, `ByteStableExportSQECoverage.md` |
+| `FileLogStoreExportError.swift` | Public export error taxonomy, destination-topology projection, public corruption-class mapping | `FileLogStoreExportTests.swift`, `FileLogStoreExportDestinationTests.swift`, `FileLogStoreExportRotatedTests.swift` |
+| `FileLogStoreExportDestinationValidation.swift` | Caller-input destination URL validation (non-file URL rejection before any path-based derivation), projecting onto `.operationFailed(.validateDestination)` | `FileLogStoreExportDestinationTests.swift` |
+| `FileLogStoreExportTestSeams.swift` | TEST-ONLY test seams projecting seam-thrown errors onto `.writeTemporaryDestinationBytes` and `.commitDestination` (the close-failure seam is wired inline in `FileLogStoreExport.closeExportTemporary`) | `FileLogStoreExportTests.swift` |
 | `FileLogStoreError.swift` | Public store errors, validation errors, invariant mapping, filesystem error context projection | `FileLogStoreTests.swift`, `FileLogStoreRotationTests.swift`, `FileLogStoreReopenTests.swift` |
 | `InternalReadError.swift` | Internal read failures and corruption-class mapping | `RecoverablePrefixScannerTests.swift`, `AcceptedLineIteratorTests.swift`, `CorpusRecoveryTests.swift` |
 | `JSONDuplicateMemberScanner.swift` | Duplicate JSON member detection, including escaped-name equivalence | `JSONDuplicateMemberScannerTests.swift`, `CorpusRecoveryTests.swift` |
-| `RecoverablePrefixScanner.swift` | Recoverable-prefix discovery, boundary-only reopen, memory-bounded scanning | `RecoverablePrefixScannerTests.swift`, `RecoverablePrefixScannerMemoryTests.swift`, `RecoverablePrefixScannerBoundaryTests.swift`, `CorpusRecoveryTests.swift` |
+| `RecoverablePrefixScanner.swift` | Recoverable-prefix discovery, recoverable-prefix boundary-only reopen, memory-bounded scanning | `RecoverablePrefixScannerTests.swift`, `RecoverablePrefixScannerMemoryTests.swift`, `RecoverablePrefixScannerBoundaryTests.swift`, `CorpusRecoveryTests.swift` |
 | `RotationPolicy.swift` | Rotation policy validation and configuration storage | `FileLogStoreRotationTests.swift` |
 | `SegmentEnumeration.swift` | Segment filename parsing, numeric ordering, regular-file filtering, metadata failure mapping, ambiguous topology rejection, descriptor-relative discovery, duplicate-tracker order independence | `SegmentEnumerationTests.swift`, `SegmentEnumerationLinearScanTests.swift`, `SegmentEnumerationLstatFailureTests.swift`, `DuplicateRotatedSegmentTrackerTests.swift`, `AcceptedLineIteratorTests.swift`, `FileLogStoreReopenTests.swift` |
 

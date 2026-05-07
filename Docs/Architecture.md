@@ -16,12 +16,13 @@ separately.
 - `PersistentLogStore`
 - `LogRecordPersistentEncoder`
 - `FileLogStore`
-- Read/replay/export are outside the M3.3.0 target.
+- Read/replay are outside the M3.3.0 target.
+- Byte-stable export lands in M3.3.2.
 
 ### Boundaries for later work
 
-Deferred APIs and roadmap ordering live in `README.md` and the
-future-design docs.
+Deferred APIs and roadmap ordering live in `README.md` and
+`ExportAndRemoveDesign.md`.
 
 ## Non-goals
 

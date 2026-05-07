@@ -66,6 +66,7 @@ let package = Package(
                 .product(name: "Loggers", package: "swift-logger")
             ],
             exclude: [
+                "ByteStableExportSQECoverage.md",
                 "CoverageMap.md",
                 "RecoveryDiscoverySQECoverage.md"
             ],

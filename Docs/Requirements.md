@@ -21,9 +21,9 @@ implementation.
 | --- | --- | --- |
 | LGP-5 | File store exposes `flush`. | M3.3.0 |
 | LGP-6 | File store rotates by size. | M3.3.1 |
-| LGP-7 | File store enforces retention. | M3.3.2 |
+| LGP-7 | File store enforces retention. | Deferred |
 | LGP-8 | File store exports retained data byte-stably. | M3.3.2 |
-| LGP-9 | File store removes retained entries. | M3.3.2 |
+| LGP-9 | File store removes retained entries. | Deferred |
 
 ## Recoverable Visibility
 
@@ -102,8 +102,9 @@ implementation.
 - **Core API.** See `Decisions/0004-ordering-model.md`,
   `Decisions/0005-failure-model.md`, and
   `Decisions/0002-envelope-storage.md`.
-- **File store lifecycle.** Export/remove details live in
-  `FutureExportDesign.md`; rotation and retention are deferred.
+- **File store lifecycle.** Current export details live in
+  `APIDesign.md`; `ExportAndRemoveDesign.md` tracks the deferred
+  remove lifecycle. Retention is deferred.
 - **Recoverable prefix / accepted bytes / replay identity.** The
   normative contract lives in `FileFormatSpec.md`.
 - **Parser and corpus governance.** Corpus categories live in
