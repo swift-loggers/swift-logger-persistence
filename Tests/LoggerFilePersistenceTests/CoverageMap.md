@@ -7,7 +7,7 @@ This document is non-normative and does not define behavior.
 Docs/FileFormatSpec.md remains the sole normative file-format contract owner.
 Docs/Requirements.md owns requirement IDs.
 
-## Coverage Index
+## Contract Coverage Index
 
 | Contract area | Requirement IDs | Status | Primary test location |
 | --- | --- | --- | --- |
@@ -31,10 +31,10 @@ Docs/Requirements.md owns requirement IDs.
 | Recovery discovery | LGP-14, LGP-15, LGP-16, LGP-17, LGP-18, LGP-36, LGP-37 | Covered | `RecoverablePrefixScannerTests.swift`, `RecoverablePrefixScannerBoundaryTests.swift`, `CorpusRecoveryTests.swift`, `RecoveryDiscoverySQECoverage.md` |
 | Accepted-line iteration | LGP-14, LGP-15, LGP-19, LGP-27, LGP-30 | Covered | `AcceptedLineIteratorTests.swift`, `AcceptedLineIteratorMidChainPartialTests.swift`, `AcceptedLineIteratorPullStreamingTests.swift`, `AcceptedLineIteratorCancellationTests.swift`, `AcceptedLineIteratorRereadTests.swift`, `RecoverablePrefixScannerTests.swift`, `RecoveryDiscoverySQECoverage.md` |
 | Corpus-governed corruption classification | LGP-33, LGP-34, LGP-35, LGP-36, LGP-37 | Covered | `RecoveryDiscoverySQECoverage.md`, `Fixtures/Corpus/` |
-| Retention policy | LGP-7 | Future scope | Not expected in PR 3/N |
+| Retention policy | LGP-2, LGP-7, LGP-8, LGP-9, LGP-11, LGP-25, LGP-27, LGP-32 | Covered | `FileLogStoreRetentionTests.swift`, `RetentionSelectionTests.swift`, `RetentionPolicySQECoverage.md` |
 | Destructive removal lifecycle | LGP-2, LGP-8, LGP-9, LGP-24, LGP-25, LGP-27, LGP-39 | Covered | `FileLogStoreRemoveTests.swift`, `FileLogStoreRemoveFailureTests.swift`, `FileLogStoreRemoveStaleBoundaryTests.swift`, `FileLogStoreRemoveConcurrencyTests.swift`, `RemoveLifecycleSQECoverage.md` |
 | Byte-stable export API | LGP-8, LGP-14, LGP-15, LGP-16, LGP-17, LGP-32 | Covered | `FileLogStoreExportTests.swift`, `FileLogStoreExportDestinationTests.swift`, `FileLogStoreExportRotatedTests.swift`, `ByteStableExportSQECoverage.md` |
-| Logical export API | LGP-32 | Future scope | Separate future API; not expected in M3.3.2 |
+| Logical export API | LGP-32 | Future scope | Separate future API. Not part of M3.3.2. |
 
 ## Implementation File Index
 
@@ -55,7 +55,7 @@ remains the review entry point.
 | `FileLogStoreExportSegmentWrite.swift` | Per-segment export byte streaming and removal-boundary entry capture | `FileLogStoreExportTests.swift`, `FileLogStoreExportRotatedTests.swift`, `ByteStableExportSQECoverage.md`, `RemoveLifecycleSQECoverage.md` |
 | `FileLogStoreExportTestSeams.swift` | TEST-ONLY test seams projecting seam-thrown errors onto `.writeTemporaryDestinationBytes` and `.commitDestination` (the close-failure seam is wired inline in `FileLogStoreExport.closeExportTemporary`) | `FileLogStoreExportTests.swift` |
 | `FileLogStoreError.swift` | Public store errors, validation errors, invariant mapping, filesystem error context projection | `FileLogStoreTests.swift`, `FileLogStoreRotationTests.swift`, `FileLogStoreReopenTests.swift` |
-| `FileLogStoreInternalTestSeams.swift` | TEST-ONLY seams for writer, export, and removal lifecycle assertions | `FileLogStoreReopenTests.swift`, `FileLogStoreExportTests.swift`, `FileLogStoreRemoveFailureTests.swift`, `FileLogStoreRemoveConcurrencyTests.swift` |
+| `FileLogStoreInternalTestSeams.swift` | TEST-ONLY seams for writer, export, removal, and retention lifecycle assertions | `FileLogStoreReopenTests.swift`, `FileLogStoreExportTests.swift`, `FileLogStoreRemoveFailureTests.swift`, `FileLogStoreRemoveConcurrencyTests.swift`, `FileLogStoreRetentionTests.swift` |
 | `FileLogStoreRemove.swift` | Destructive removal lifecycle, boundary consumption, pending-close drain on removal entry, per-entry dispatch, retry progress tracking, nonreentrant removal serialization | `FileLogStoreRemoveTests.swift`, `FileLogStoreRemoveFailureTests.swift`, `FileLogStoreRemoveConcurrencyTests.swift`, `RemoveLifecycleSQECoverage.md` |
 | `FileLogStoreRemoveCompaction.swift` | Removal-boundary revalidation, ambiguous topology rejection, preserved-suffix compaction, temp-file lifecycle, atomic segment replacement | `FileLogStoreRemoveTests.swift`, `FileLogStoreRemoveStaleBoundaryTests.swift`, `FileLogStoreRemoveFailureTests.swift`, `RemoveLifecycleSQECoverage.md` |
 | `FileLogStoreRemoveError.swift` | Public remove error taxonomy, operation mapping, stale-boundary projection | `FileLogStoreRemoveTests.swift`, `FileLogStoreRemoveStaleBoundaryTests.swift`, `FileLogStoreRemoveFailureTests.swift` |
@@ -65,7 +65,9 @@ remains the review entry point.
 | `OperationBoundary.swift` | Nonreentrant operation-boundary serialization across append, flush, export, and removal, including lease-match hand-off safety, FIFO hand-off across multiple queued waiters, and non-cancelable queued-waiter semantics | `OperationBoundaryTests.swift`, `FileLogStoreExportTests.swift`, `FileLogStoreRemoveConcurrencyTests.swift` |
 | `RecoverablePrefixScanner.swift` | Recoverable-prefix discovery, recoverable-prefix boundary-only reopen, memory-bounded scanning | `RecoverablePrefixScannerTests.swift`, `RecoverablePrefixScannerMemoryTests.swift`, `RecoverablePrefixScannerBoundaryTests.swift`, `CorpusRecoveryTests.swift` |
 | `RemovalBoundary.swift` | In-memory removal-boundary model and file identity state | `FileLogStoreRemoveTests.swift`, `FileLogStoreRemoveStaleBoundaryTests.swift`, `RemoveLifecycleSQECoverage.md` |
+| `RetentionPolicy.swift` | Retention policy validation, configuration storage, factory boundaries | `FileLogStoreRetentionTests.swift`, `RetentionPolicySQECoverage.md` |
 | `RotationPolicy.swift` | Rotation policy validation and configuration storage | `FileLogStoreRotationTests.swift` |
+| `FileLogStoreRetention.swift` | Whole-rotated-segment retention enforcement, active-segment exclusion, descriptor-relative deletion, post-seam candidate revalidation, overflow-safe `.maxTotalBytes` selection, and failure projection onto `.enforceRetention` | `FileLogStoreRetentionTests.swift`, `RetentionSelectionTests.swift`, `RetentionPolicySQECoverage.md` |
 | `SegmentEnumeration.swift` | Segment filename parsing, numeric ordering, regular-file filtering, metadata failure mapping, ambiguous topology rejection, descriptor-relative discovery, configured-root TOCTOU rejection, duplicate-tracker order independence | `SegmentEnumerationTests.swift`, `SegmentEnumerationLinearScanTests.swift`, `SegmentEnumerationLstatFailureTests.swift`, `DuplicateRotatedSegmentTrackerTests.swift`, `SymlinkedConfiguredRootTests.swift`, `AcceptedLineIteratorTests.swift`, `AcceptedLineIteratorMidScanTOCTOUTests.swift`, `FileLogStoreReopenTests.swift`, `FileLogStoreWriterMidScanTOCTOUTests.swift` |
 
 ## Test Infrastructure Closure Matrix

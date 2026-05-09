@@ -2,9 +2,9 @@
 
 Lightweight traceability for `swift-logger-persistence`. Each requirement
 carries an `LGP-N` identifier for ADRs, implementation work, and future
-tests to reference. The "Target" column names the intended milestone or
-documentation owner; implementation status is tracked by roadmap and
-coverage documents.
+tests to reference. The "Target" column records the milestone or
+documentation owner associated with the requirement; implementation
+status is tracked by roadmap and coverage documents.
 
 ## Core API
 
@@ -21,7 +21,7 @@ coverage documents.
 | --- | --- | --- |
 | LGP-5 | File store exposes `flush`. | M3.3.0 |
 | LGP-6 | File store rotates by size. | M3.3.1 |
-| LGP-7 | File store enforces retention. | Deferred |
+| LGP-7 | File store enforces retention. | M3.3.2 |
 | LGP-8 | File store exports retained data byte-stably. | M3.3.2 |
 | LGP-9 | File store removes retained entries. | M3.3.2 |
 
@@ -91,7 +91,7 @@ coverage documents.
 | --- | --- | --- |
 | LGP-38 | Validation precedence is a compatibility contract. | M3.3.0 |
 
-## Deferred Policy
+## Rotation Compatibility
 
 | ID | Requirement | Target |
 | --- | --- | --- |
@@ -102,9 +102,10 @@ coverage documents.
 - **Core API.** See `Decisions/0004-ordering-model.md`,
   `Decisions/0005-failure-model.md`, and
   `Decisions/0002-envelope-storage.md`.
-- **File store lifecycle.** Current export and remove details live in
-  `APIDesign.md`; `ExportAndRemoveDesign.md` tracks non-normative
-  export/remove design notes. Retention is deferred.
+- **File store lifecycle.** Current export, remove, and retention
+  details live in `APIDesign.md`; `ExportAndRemoveDesign.md` tracks
+  non-normative export/remove/retention design notes (count/byte
+  retention shipped; age-based retention deferred).
 - **Recoverable prefix / accepted bytes / replay identity.** The
   normative contract lives in `FileFormatSpec.md`.
 - **Parser and corpus governance.** Corpus categories live in

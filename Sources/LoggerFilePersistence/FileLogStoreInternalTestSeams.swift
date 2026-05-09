@@ -15,19 +15,16 @@ internal enum TestSeamFailure: Error, Sendable {
 extension FileLogStore {
     // swiftlint:disable identifier_name
 
-    /// TEST-ONLY: installs a test seam that fires immediately before each
-    /// `openSegmentForWriting` call (initial open and rotation) once
-    /// the held writer root is in hand. A throw from the test seam is
-    /// projected onto `.openWritableSegment`.
+    /// TEST-ONLY: installs a seam before writable segment open.
+    /// Thrown errors project to `.openWritableSegment`.
     internal func _setOnBeforeOpenWritableSegmentForTesting(
         _ hook: (@Sendable () throws -> Void)?
     ) {
         onBeforeOpenWritableSegmentForTesting = hook
     }
 
-    /// TEST-ONLY: installs a test seam that fires between the post-create
-    /// root `lstat` snapshot and the `SegmentRoot.open` call. A
-    /// throw from the test seam is projected onto `.openWritableSegment`.
+    /// TEST-ONLY: installs a seam before writer-root open.
+    /// Thrown errors project to `.openWritableSegment`.
     internal func _setOnBeforeWriterRootOpenForTesting(
         _ hook: (@Sendable () throws -> Void)?
     ) {
@@ -35,93 +32,79 @@ extension FileLogStore {
     }
 
     /// TEST-ONLY: installs a seam before export temp fsync.
-    /// Throws project to `.writeTemporaryDestinationBytes`.
+    /// Thrown errors project to `.writeTemporaryDestinationBytes`.
     internal func _setOnAfterWritingTemporaryBytesForTesting(
         _ hook: (@Sendable () async throws -> Void)?
     ) {
         onAfterWritingTemporaryBytesForTesting = hook
     }
 
-    /// TEST-ONLY: installs a test seam fired inside the export critical
-    /// section after the temp file is closed and immediately
-    /// before the atomic commit, used to plant a destination
-    /// entry between final pre-check and `renameatx_np`. A throw
-    /// projects to `.operationFailed(.commitDestination)`.
+    /// TEST-ONLY: installs a seam before export commit.
+    /// Thrown errors project to `.commitDestination`.
     internal func _setOnBeforeCommitForTesting(
         _ hook: (@Sendable () throws -> Void)?
     ) {
         onBeforeCommitForTesting = hook
     }
 
-    /// TEST-ONLY: installs a test seam fired at the end of `append`
-    /// after admitted bytes reach the active segment. Used to
-    /// observe append completion ordering against export.
+    /// TEST-ONLY: installs a seam after admitted append bytes reach storage.
     internal func _setOnAfterAppendForTesting(
         _ hook: (@Sendable () -> Void)?
     ) {
         onAfterAppendForTesting = hook
     }
 
-    /// TEST-ONLY: installs a test seam fired at the first instruction
-    /// of `append`, immediately after the operation boundary is
-    /// acquired. Pairs with `_setOnAfterAppendForTesting` to record
-    /// the append operation interval for single-flight proofs.
+    /// TEST-ONLY: installs a seam after append acquires the operation boundary.
     internal func _setOnBeforeAppendForTesting(
         _ hook: (@Sendable () -> Void)?
     ) {
         onBeforeAppendForTesting = hook
     }
 
-    /// TEST-ONLY: installs a test seam that simulates a `close(2)`
-    /// failure on the export temporary file. A throw projects to
-    /// `.operationFailed(.closeTemporaryDestination)`; the
-    /// descriptor is best-effort closed for test cleanup.
+    /// TEST-ONLY: installs a seam before export temp close.
+    /// Thrown errors project to `.closeTemporaryDestination`.
     internal func _setOnCloseTemporaryDestinationForTesting(
         _ hook: (@Sendable () throws -> Void)?
     ) {
         onCloseTemporaryDestinationForTesting = hook
     }
 
-    /// TEST-ONLY: installs an async rendezvous seam before each
-    /// per-entry removal mutation. Throws project to
-    /// `.operationFailed(.validateBoundary)`.
+    /// TEST-ONLY: installs a seam before each per-entry removal mutation.
+    /// Thrown errors project to `.validateBoundary`.
     internal func _setOnBeforeProcessRemovalEntryForTesting(
         _ hook: (@Sendable (URL) async throws -> Void)?
     ) {
         onBeforeProcessRemovalEntryForTesting = hook
     }
 
-    /// TEST-ONLY: installs a test seam fired after a destructive
-    /// segment mutation completes but before the active-writer
-    /// reopen runs. Used to assert the boundary tail advances
-    /// past the entry once destruction has occurred.
+    /// TEST-ONLY: installs a seam before active-writer reopen after removal mutation.
     internal func _setOnBeforeReopenActiveSegmentForTesting(
         _ hook: (@Sendable (URL) throws -> Void)?
     ) {
         onBeforeReopenActiveSegmentForTesting = hook
     }
 
-    /// TEST-ONLY: installs a test seam fired immediately before
-    /// the compaction read descriptor is opened, after per-entry
-    /// revalidation has succeeded. A throw projects to
-    /// `.operationFailed(.openSegment)`. Used to deterministically
-    /// race a regular-file swap or a truncate-below-boundary
-    /// against the compaction-time revalidation.
+    /// TEST-ONLY: installs a seam before compaction opens a segment for reading.
+    /// Thrown errors project to `.openSegment`.
     internal func _setOnBeforeOpenCompactionReadForTesting(
         _ hook: (@Sendable (URL) throws -> Void)?
     ) {
         onBeforeOpenCompactionReadForTesting = hook
     }
 
-    /// TEST-ONLY: classification seam for stale-boundary
-    /// rotated-topology validation. Returning a non-nil
-    /// `InternalReadError` bypasses on-disk enumeration and
-    /// injects a synthetic failure into the classification
-    /// pipeline.
+    /// TEST-ONLY: installs a rotated-topology classification override.
     internal func _setRotatedTopologyOverrideForTesting(
         _ hook: (@Sendable () -> InternalReadError?)?
     ) {
         rotatedTopologyOverrideForTesting = hook
+    }
+
+    /// TEST-ONLY: installs a seam before each retention segment deletion.
+    /// Thrown errors project to `.enforceRetention`.
+    internal func _setOnBeforeRetentionUnlinkForTesting(
+        _ hook: (@Sendable (URL) throws -> Void)?
+    ) {
+        onBeforeRetentionUnlinkForTesting = hook
     }
 
     // swiftlint:enable identifier_name

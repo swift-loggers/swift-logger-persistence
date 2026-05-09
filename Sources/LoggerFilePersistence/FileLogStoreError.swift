@@ -2,7 +2,7 @@ import Foundation
 
 /// A typed error thrown by ``FileLogStore``.
 ///
-/// Failure surface is defined by `Docs/FileFormatSpec.md`.
+/// Failure surface is defined per the file-format specification.
 public enum FileLogStoreError: Error, Sendable, Equatable {
     /// A file-system or encoding step failed mid-operation.
     ///
@@ -16,8 +16,8 @@ public enum FileLogStoreError: Error, Sendable, Equatable {
         context: FileSystemErrorContext
     )
 
-    /// The envelope failed pre-admission validation defined by
-    /// `Docs/FileFormatSpec.md` ("Validation").
+    /// The envelope failed pre-admission validation defined per the
+    /// file-format specification.
     case invalidEnvelope(reason: FileLogStoreEnvelopeValidationError)
 
     /// An implementation invariant was violated.
@@ -31,7 +31,7 @@ public enum FileLogStoreError: Error, Sendable, Equatable {
 /// performing when an error surfaced.
 ///
 /// Listed in pipeline order. Operations are append-only within one
-/// package major version per `Docs/APICompatibility.md`.
+/// package major version per the API compatibility policy.
 public enum FileLogStoreOperation: String, Sendable, Equatable {
     /// Creating the segment directory.
     case createDirectory
@@ -46,14 +46,18 @@ public enum FileLogStoreOperation: String, Sendable, Equatable {
     case encodeEnvelope
     /// First mutating-storage boundary.
     case admitEnvelope
+    /// Writing admitted envelope bytes to the active segment.
     case appendEnvelopeBytes
+    /// Flushing the active segment durability boundary.
     case flushBoundary
+    /// Retention enforcement after successful append admission.
+    case enforceRetention
 }
 
-/// Pre-admission envelope validation failures defined by
-/// `Docs/FileFormatSpec.md` ("Validation").
+/// Pre-admission envelope validation failures defined per the
+/// file-format specification.
 ///
-/// Cases are listed in the spec's "Validation Precedence" order.
+/// Cases are listed in the spec's validation-precedence order.
 public enum FileLogStoreEnvelopeValidationError: Sendable, Equatable {
     /// `id` is not in the canonical hyphenated RFC 4122 form with
     /// lower-case hexadecimal digits (`8-4-4-4-12`).
@@ -91,10 +95,9 @@ public enum FileLogStoreEnvelopeValidationError: Sendable, Equatable {
 
 /// Implementation-defect signals raised by ``FileLogStore``.
 ///
-/// Each case corresponds to a broken postcondition documented in
-/// `Docs/FileFormatSpec.md` ("Implementation Invariant Diagnostics").
-/// These cases name implementation defects, not caller-actionable
-/// validation failures.
+/// Each case corresponds to a broken postcondition documented per
+/// the file-format specification. These cases name implementation
+/// defects, not caller-actionable validation failures.
 public enum PersistenceInvariantError: String, Sendable, Equatable {
     /// `append(_:)` completed without producing the expected
     /// envelope line in the recoverable prefix.
@@ -117,8 +120,7 @@ public enum PersistenceInvariantError: String, Sendable, Equatable {
 
 /// Value-typed snapshot of a file-system error.
 ///
-/// Carries the error's domain, code, and localized description so
-/// callers can pattern-match the failure cause.
+/// Carries stable domain/code fields plus non-stable diagnostic text.
 public struct FileSystemErrorContext: Sendable, Equatable {
     /// The error domain (e.g. `NSCocoaErrorDomain`,
     /// `NSPOSIXErrorDomain`).

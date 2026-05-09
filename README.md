@@ -84,7 +84,7 @@ file-backed API surface (iOS 13.4 / tvOS 13.4 / macOS 10.15.4 / watchOS 6.2 /
 visionOS 1) so the manifest stays compatible across the milestone PR
 sequence.
 
-## Planned usage model
+## Usage model
 
 The intended write pipeline is:
 
@@ -103,9 +103,10 @@ persistence APIs.
 > durable append success; canonical bytes and accepted ordering define
 > replay identity.
 
-The M3.3.0 target is intentionally unbounded. Size-based rotation
-lands in M3.3.1; byte-stable export and destructive removal land in
-M3.3.2. Retention remains deferred.
+The original M3.3.0 append/flush target was intentionally unbounded.
+M3.3.1 adds size-based rotation. M3.3.2 adds byte-stable export,
+destructive removal, and count/byte retention. Age-based retention
+remains deferred.
 
 ## Documentation
 
@@ -121,9 +122,9 @@ M3.3.2. Retention remains deferred.
 - [`Docs/APICompatibility.md`](Docs/APICompatibility.md) --
   public diagnostic evolution policy.
 - [`Docs/APIDesign.md`](Docs/APIDesign.md) -- API design draft,
-  including current file-store export/remove surfaces and deferred
-  retention shape; it is intentionally non-normative for wire-format
-  semantics.
+  including current file-store export/remove surfaces and current
+  count/byte retention shape (age-based retention deferred); it is
+  intentionally non-normative for wire-format semantics.
 - [`Docs/Architecture.md`](Docs/Architecture.md) -- non-normative
   design overview (scope, non-goals, layering, logical view, failure
   model).

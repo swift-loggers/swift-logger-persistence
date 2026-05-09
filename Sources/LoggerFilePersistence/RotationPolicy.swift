@@ -1,8 +1,8 @@
 /// Segment-rotation policy for ``FileLogStore``.
 ///
 /// Segment naming, rotation boundaries, and retention are policy
-/// contracts, not part of the portable wire-format contract per
-/// `Docs/FileFormatSpec.md` ("Operational Notes").
+/// contracts, not part of the portable wire-format contract per the
+/// file-format specification.
 public struct RotationPolicy: Sendable, Equatable {
     enum Kind: Sendable, Equatable {
         case never
@@ -40,9 +40,11 @@ public struct RotationPolicy: Sendable, Equatable {
 }
 
 /// Configuration validation failures raised by ``RotationPolicy``
-/// factories.
+/// and ``RetentionPolicy`` factories.
 public enum FileLogStoreConfigurationError: Error, Sendable, Equatable {
     /// The requested segment cap is below
     /// ``FileLogStore/maxEncodedLineBytes``.
     case invalidRotationPolicy
+    /// The requested retention bound is below its policy lower limit.
+    case invalidRetentionPolicy
 }
