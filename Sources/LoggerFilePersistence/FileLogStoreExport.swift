@@ -7,7 +7,10 @@ extension FileLogStore {
     /// overwrites an existing entry at the destination.
     ///
     /// Serialization semantics: export discovery and export
-    /// writes execute within this actor-isolated operation.
+    /// writes execute while holding the nonreentrant operation
+    /// boundary. Concurrent append, flush, export, and removal
+    /// callers wait until the export operation releases that
+    /// boundary.
     /// Accepted bytes are preserved byte-for-byte from each
     /// segment's recoverable prefix in accepted ordering.
     /// (`.never` → `log.ndjson`; `.bySize` → rotated segments
@@ -24,6 +27,12 @@ extension FileLogStore {
     public func exportLogs(
         to url: URL
     ) async throws(FileLogStoreExportError) {
+        let lease = await operationBoundary.enter()
+        // Production-balanced enter/exit always matches, so
+        // the result is discarded here; `defer` has no
+        // practical throwing path. The mismatch contract is
+        // pinned by `OperationBoundary` unit coverage.
+        defer { _ = operationBoundary.exit(lease) }
         try validateExportDestinationURL(url)
         drainPendingCloseHandles()
         let exportRoot = try resolveExportRoot()
@@ -35,18 +44,22 @@ extension FileLogStore {
         try validateExportParentURL(parentURL, finalURL: url)
         let finalLeaf = url.lastPathComponent
         let parentFD = try openExportParentDirectory(parentURL)
-        defer { Darwin.close(parentFD) }
+        defer { _ = Darwin.close(parentFD) }
         try validateFinalDestinationAbsent(
             parentFD: parentFD, leaf: finalLeaf, finalURL: url
         )
 
-        try writeAndCommitExport(
+        let boundaryEntries = try await writeAndCommitExport(
             parentFD: parentFD,
             finalLeaf: finalLeaf,
             finalURL: url,
             root: root,
             segments: segments
         )
+        // Capture the in-memory removal boundary only after the
+        // final destination commit has succeeded. A failed export
+        // must not advance or create a removal boundary.
+        removalBoundary = RemovalBoundary(entries: boundaryEntries)
 
         // Best-effort directory-entry durability after commit. A
         // failure here does not invalidate the already-visible
@@ -56,58 +69,94 @@ extension FileLogStore {
 
     /// Drives the temp-create / write / sync / close / atomic-commit
     /// sequence and unwinds the temp file on any failure.
+    /// Returns the per-segment removal-boundary entries captured
+    /// during the write phase; the caller stores them on actor
+    /// state only after a successful commit.
     private func writeAndCommitExport(
         parentFD: Int32,
         finalLeaf: String,
         finalURL: URL,
         root: SegmentRoot?,
         segments: [URL]
-    ) throws(FileLogStoreExportError) {
-        // Bounded temp leaf, independent of `finalLeaf` length, so
-        // a long-but-valid final filename does not push the temp
-        // entry past `NAME_MAX`.
-        let tempLeaf = ".swift-logger-export-\(UUID().uuidString).tmp"
-        let tempURL = finalURL.deletingLastPathComponent()
-            .appendingPathComponent(tempLeaf)
-        let tempFD = try createExportTemporary(
-            parentFD: parentFD, leaf: tempLeaf, url: tempURL
+    ) async throws(FileLogStoreExportError) -> [RemovalBoundaryEntry] {
+        // Private temp directory in the destination parent
+        // (mode 0o700) confines partial export bytes during the
+        // write phase: the file inside is not reachable by other
+        // principals because the directory itself denies them
+        // search/read access. The payload file is then created
+        // with mode 0o666, which the platform umask filters into
+        // the final-destination permission bits — no library-
+        // level `umask(0)` lookup or process-wide umask side
+        // effect is needed.
+        let tempDirLeaf = ".swift-logger-export-\(UUID().uuidString).tmpdir"
+        let tempLeaf = "export.tmp"
+        let tempDirURL = finalURL.deletingLastPathComponent()
+            .appendingPathComponent(tempDirLeaf)
+        let tempURL = tempDirURL.appendingPathComponent(tempLeaf)
+
+        let tempDirFD = try createExportTempDirectory(
+            parentFD: parentFD, leaf: tempDirLeaf, url: tempDirURL
         )
-        var tempFDIsOpen = true
         var committed = false
         defer {
-            if tempFDIsOpen { Darwin.close(tempFD) }
             if !committed {
-                _ = tempLeaf.withCString { cName in
-                    unlinkat(parentFD, cName, 0)
+                // Failure path: best-effort unlink of the temp
+                // file inside the private dir, then rmdir of the
+                // dir itself. Cleanup failures here do not
+                // change the export error already in flight.
+                _ = tempLeaf.withCString {
+                    Darwin.unlinkat(tempDirFD, $0, 0)
                 }
             }
+            // Always remove the private temp dir: empty after a
+            // successful commit (renameat moved the file out)
+            // and emptied above on the failure path.
+            _ = tempDirLeaf.withCString {
+                Darwin.unlinkat(parentFD, $0, AT_REMOVEDIR)
+            }
+            _ = Darwin.close(tempDirFD)
         }
 
+        let tempFD = try createExportTemporary(
+            tempDirFD: tempDirFD, leaf: tempLeaf, url: tempURL
+        )
+        var tempFDIsOpen = true
+        defer {
+            if tempFDIsOpen { _ = Darwin.close(tempFD) }
+        }
+
+        var boundaryEntries: [RemovalBoundaryEntry] = []
         if let root {
-            try writeSegmentsToTemp(
+            boundaryEntries = try writeSegmentsToTemp(
                 root: root, segments: segments,
                 tempFD: tempFD, tempURL: tempURL
             )
         }
-        try fireOnAfterWritingTemporaryBytesSeam(tempURL: tempURL)
+        try await fireOnAfterWritingTemporaryBytesSeam(tempURL: tempURL)
         try syncExportTemporary(descriptor: tempFD, url: tempURL)
-        // Mark the descriptor consumed before invoking close: a
-        // failed `close(2)` leaves the fd in an undefined state and
-        // POSIX disallows retry, so the deferred cleanup must not
-        // attempt to close it again. Temp unlink still runs because
-        // `committed` stays false until the rename succeeds.
+        // Mark the export temporary's raw fd as consumed before
+        // invoking close. The `pendingCloseHandles` queue
+        // retains owning `FileHandle`s for deferred close; the
+        // export temporary is a raw descriptor closed explicitly
+        // here. After a failed `close(2)` the fd is in an
+        // undefined state and must not be closed a second time,
+        // so the deferred cleanup skips it. Temp unlink still
+        // runs because `committed` stays false until the rename
+        // succeeds.
         tempFDIsOpen = false
         try closeExportTemporary(descriptor: tempFD, url: tempURL)
 
         try fireOnBeforeCommitSeam(finalURL: finalURL)
 
         try commitExportDestination(
-            parentFD: parentFD,
+            tempDirFD: tempDirFD,
             tempLeaf: tempLeaf,
+            parentFD: parentFD,
             finalLeaf: finalLeaf,
             finalURL: finalURL
         )
         committed = true
+        return boundaryEntries
     }
 }
 
@@ -172,171 +221,6 @@ extension FileLogStore {
     }
 }
 
-// MARK: - Per-segment write
-
-extension FileLogStore {
-    private func writeSegmentsToTemp(
-        root: SegmentRoot,
-        segments: [URL],
-        tempFD: Int32,
-        tempURL: URL
-    ) throws(FileLogStoreExportError) {
-        for segmentURL in segments {
-            try writeSegmentToTemp(
-                root: root,
-                segmentURL: segmentURL,
-                tempFD: tempFD,
-                tempURL: tempURL
-            )
-        }
-    }
-
-    private func writeSegmentToTemp(
-        root: SegmentRoot,
-        segmentURL: URL,
-        tempFD: Int32,
-        tempURL: URL
-    ) throws(FileLogStoreExportError) {
-        let handle: FileHandle
-        do {
-            handle = try root.openSegmentForReading(url: segmentURL)
-        } catch {
-            throw FileLogStoreExportError(
-                projecting: error,
-                onto: .openSegment
-            )
-        }
-        defer { try? handle.close() }
-
-        let boundary = try resolveExportBoundary(
-            handle: handle, segmentURL: segmentURL
-        )
-        if boundary == 0 { return }
-        try copySegmentBytesToTemp(
-            handle: handle,
-            boundary: boundary,
-            segmentURL: segmentURL,
-            tempFD: tempFD,
-            tempURL: tempURL
-        )
-    }
-
-    /// Resolves the recoverable-prefix end of `segmentURL` against
-    /// the open `handle` and projects scanner failure onto the
-    /// export error surface; interior corruption is rethrown as
-    /// `.interiorCorruption`.
-    private func resolveExportBoundary(
-        handle: FileHandle, segmentURL: URL
-    ) throws(FileLogStoreExportError) -> UInt64 {
-        let resolution: RecoverablePrefixScanner.BoundaryResolution
-        do {
-            resolution = try RecoverablePrefixScanner.resolveBoundary(
-                handle: handle, segmentURL: segmentURL
-            )
-        } catch {
-            throw FileLogStoreExportError(
-                projecting: error, onto: .readSegmentBytes
-            )
-        }
-        switch resolution {
-        case let .boundary(value):
-            return value
-        case let .interiorCorruption(byteOffset, classification):
-            throw .interiorCorruption(
-                segmentURL: segmentURL,
-                byteOffset: byteOffset,
-                classification: FileLogStoreExportCorruptionClass(classification)
-            )
-        }
-    }
-
-    /// Streams `[0, boundary)` bytes from `handle` into `tempFD` in
-    /// 64 KiB chunks. Unexpected EOF before `boundary` projects to
-    /// `.operationFailed(.readSegmentBytes)`.
-    private func copySegmentBytesToTemp(
-        handle: FileHandle,
-        boundary: UInt64,
-        segmentURL: URL,
-        tempFD: Int32,
-        tempURL: URL
-    ) throws(FileLogStoreExportError) {
-        do {
-            try handle.seek(toOffset: 0)
-        } catch {
-            throw .operationFailed(
-                operation: .readSegmentBytes,
-                url: segmentURL,
-                context: FileSystemErrorContext(from: error)
-            )
-        }
-        var remaining = boundary
-        while remaining > 0 {
-            let chunkCap: UInt64 = 65536
-            let toRead = Int(min(chunkCap, remaining))
-            let chunk: Data?
-            do {
-                chunk = try handle.read(upToCount: toRead)
-            } catch {
-                throw .operationFailed(
-                    operation: .readSegmentBytes,
-                    url: segmentURL,
-                    context: FileSystemErrorContext(from: error)
-                )
-            }
-            guard let chunk, !chunk.isEmpty else {
-                throw .operationFailed(
-                    operation: .readSegmentBytes,
-                    url: segmentURL,
-                    context: FileSystemErrorContext(
-                        domain: FileSystemErrorContext.packageDomain,
-                        code: nil,
-                        description: "unexpectedEOFBeforeBoundary"
-                    )
-                )
-            }
-            try writeAllToTemporary(chunk, tempFD: tempFD, tempURL: tempURL)
-            remaining -= UInt64(chunk.count)
-        }
-    }
-
-    private func writeAllToTemporary(
-        _ data: Data,
-        tempFD: Int32,
-        tempURL: URL
-    ) throws(FileLogStoreExportError) {
-        let total = data.count
-        if total == 0 { return }
-        var written = 0
-        var failure: FileLogStoreExportError?
-        data.withUnsafeBytes { (buffer: UnsafeRawBufferPointer) in
-            guard let base = buffer.baseAddress else { return }
-            while written < total {
-                let result = Darwin.write(
-                    tempFD,
-                    base.advanced(by: written),
-                    total - written
-                )
-                if result < 0 {
-                    let savedErrno = errno
-                    if savedErrno == EINTR { continue }
-                    failure = .operationFailed(
-                        operation: .writeTemporaryDestinationBytes,
-                        url: tempURL,
-                        context: FileSystemErrorContext(
-                            domain: NSPOSIXErrorDomain,
-                            code: Int(savedErrno),
-                            description: "write failed"
-                        )
-                    )
-                    return
-                }
-                written += result
-            }
-        }
-        if let failure { throw failure }
-    }
-}
-
 // MARK: - Destination open / commit
 
 extension FileLogStore {
@@ -349,7 +233,7 @@ extension FileLogStore {
         }
         guard let descriptor else {
             throw .operationFailed(
-                operation: .validateDestination,
+                operation: .openDestinationParent,
                 url: url,
                 context: FileSystemErrorContext(
                     domain: FileSystemErrorContext.packageDomain,
@@ -372,7 +256,7 @@ extension FileLogStore {
                     context: FileSystemErrorContext(
                         domain: NSPOSIXErrorDomain,
                         code: Int(savedErrno),
-                        description: "open(parent O_DIRECTORY) failed"
+                        description: "destination parent open failed"
                     )
                 )
             }
@@ -398,7 +282,7 @@ extension FileLogStore {
                 context: FileSystemErrorContext(
                     domain: NSPOSIXErrorDomain,
                     code: Int(savedErrno),
-                    description: "fstatat(final) failed"
+                    description: "final destination validation failed"
                 )
             )
         }
@@ -416,18 +300,112 @@ extension FileLogStore {
         }
     }
 
-    private func createExportTemporary(
+    // swiftlint:disable function_body_length
+    // Reason: Three failure points (mkdirat / fchmodat / openat) each carry their own cleanup-then-throw projection so each half-created private temp directory failure path attempts cleanup before projecting its error.
+
+    /// Creates a private (`0o700`) temp directory in the
+    /// destination parent and returns an opened descriptor.
+    /// The directory confines the export's payload temp file so
+    /// partial bytes are not readable by other principals
+    /// during the write phase. Failure attempts to clean up
+    /// the half-created directory before throwing; the cleanup
+    /// is filesystem best-effort, not an absolute guarantee.
+    private func createExportTempDirectory(
         parentFD: Int32,
         leaf: String,
         url: URL
     ) throws(FileLogStoreExportError) -> Int32 {
-        let mode: mode_t = 0o600
+        let mkdirResult = leaf.withCString { cName in
+            Darwin.mkdirat(parentFD, cName, 0o700)
+        }
+        if mkdirResult != 0 {
+            let savedErrno = errno
+            throw .operationFailed(
+                operation: .createTemporaryDestination,
+                url: url,
+                context: FileSystemErrorContext(
+                    domain: NSPOSIXErrorDomain,
+                    code: Int(savedErrno),
+                    description: "export temp directory create failed"
+                )
+            )
+        }
+        // Enforce private temp directory permissions explicitly.
+        // `mkdirat`'s mode is filtered by the platform umask, so
+        // a strict umask (e.g. `077` masking group/other bits
+        // already covered by `0o700` is fine, but a hostile
+        // umask masking owner bits would weaken the private
+        // contract). `fchmodat` re-applies the exact mode bits
+        // the private-temp-dir invariant requires.
+        let chmodResult = leaf.withCString { cName in
+            // `AT_SYMLINK_NOFOLLOW` so a symlink racing into
+            // place between `mkdirat` and `fchmodat` is not
+            // followed; the subsequent `openat(... O_NOFOLLOW
+            // | O_DIRECTORY)` is the canonical defender, but
+            // keeping the chmod no-follow closes the small
+            // intervening window.
+            Darwin.fchmodat(parentFD, cName, 0o700, AT_SYMLINK_NOFOLLOW)
+        }
+        if chmodResult != 0 {
+            let savedErrno = errno
+            _ = leaf.withCString {
+                Darwin.unlinkat(parentFD, $0, AT_REMOVEDIR)
+            }
+            throw .operationFailed(
+                operation: .createTemporaryDestination,
+                url: url,
+                context: FileSystemErrorContext(
+                    domain: NSPOSIXErrorDomain,
+                    code: Int(savedErrno),
+                    description: "export temp directory mode enforcement failed"
+                )
+            )
+        }
+        let dirFD = leaf.withCString { cName in
+            Darwin.openat(
+                parentFD, cName,
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+            )
+        }
+        if dirFD < 0 {
+            let savedErrno = errno
+            // Best-effort cleanup of the just-created directory
+            // before surfacing the open failure.
+            _ = leaf.withCString {
+                Darwin.unlinkat(parentFD, $0, AT_REMOVEDIR)
+            }
+            throw .operationFailed(
+                operation: .createTemporaryDestination,
+                url: url,
+                context: FileSystemErrorContext(
+                    domain: NSPOSIXErrorDomain,
+                    code: Int(savedErrno),
+                    description: "export temp directory open failed"
+                )
+            )
+        }
+        return dirFD
+    }
+
+    // swiftlint:enable function_body_length
+
+    /// Creates the export payload temp file inside the private
+    /// temp directory. The file is created with mode `0o666` so
+    /// the platform umask filters it into the final-destination
+    /// permission bits; the surrounding `0o700` directory
+    /// already prevents other principals from reading the
+    /// partial bytes during the write phase.
+    private func createExportTemporary(
+        tempDirFD: Int32,
+        leaf: String,
+        url: URL
+    ) throws(FileLogStoreExportError) -> Int32 {
         let descriptor = leaf.withCString { cName in
             Darwin.openat(
-                parentFD,
+                tempDirFD,
                 cName,
                 O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
-                mode
+                0o666
             )
         }
         if descriptor < 0 {
@@ -438,7 +416,7 @@ extension FileLogStore {
                 context: FileSystemErrorContext(
                     domain: NSPOSIXErrorDomain,
                     code: Int(savedErrno),
-                    description: "openat(temp O_CREAT|O_EXCL|O_NOFOLLOW) failed"
+                    description: "export temporary create failed"
                 )
             )
         }
@@ -457,7 +435,7 @@ extension FileLogStore {
                 context: FileSystemErrorContext(
                     domain: NSPOSIXErrorDomain,
                     code: Int(savedErrno),
-                    description: "fsync(temp) failed"
+                    description: "export temporary sync failed"
                 )
             )
         }
@@ -497,14 +475,19 @@ extension FileLogStore {
     }
 
     private func commitExportDestination(
-        parentFD: Int32,
+        tempDirFD: Int32,
         tempLeaf: String,
+        parentFD: Int32,
         finalLeaf: String,
         finalURL: URL
     ) throws(FileLogStoreExportError) {
+        // Cross-directory atomic rename: temp file in the
+        // private temp dir → final leaf in the destination
+        // parent. The private dir is removed by the caller's
+        // `defer` after this returns (or on the failure path).
         let result = tempLeaf.withCString { tmpC in
             finalLeaf.withCString { finalC in
-                renameatx_np(parentFD, tmpC, parentFD, finalC, UInt32(RENAME_EXCL))
+                renameatx_np(tempDirFD, tmpC, parentFD, finalC, UInt32(RENAME_EXCL))
             }
         }
         if result == 0 { return }
@@ -551,7 +534,7 @@ extension FileLogStore {
 // MARK: - Internal-error → export-error projection
 
 extension FileLogStoreExportError {
-    fileprivate init(
+    init(
         projecting error: InternalReadError,
         onto operation: FileLogStoreExportOperation
     ) {

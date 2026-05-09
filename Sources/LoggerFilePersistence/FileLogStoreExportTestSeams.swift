@@ -8,12 +8,15 @@ import Foundation
 extension FileLogStore {
     /// Fires the post-write export test seam. A throwing test seam projects
     /// onto `.operationFailed(.writeTemporaryDestinationBytes)`.
+    /// The hook is `async` so tests can rendezvous through
+    /// continuation-based primitives without blocking the
+    /// cooperative pool.
     func fireOnAfterWritingTemporaryBytesSeam(
         tempURL: URL
-    ) throws(FileLogStoreExportError) {
+    ) async throws(FileLogStoreExportError) {
         guard let hook = onAfterWritingTemporaryBytesForTesting else { return }
         do {
-            try hook()
+            try await hook()
         } catch {
             throw .operationFailed(
                 operation: .writeTemporaryDestinationBytes,

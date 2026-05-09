@@ -9,14 +9,17 @@ Normative durability contract lives in `FileFormatSpec.md`.
 
 ### M3.3.0 target shape
 
-This spec-only PR documents the target shape; implementation lands
-separately.
+M3.3.0 establishes the package-local persistence API and file-backed
+storage shape.
 
 - `PersistentLogEnvelope` value type
 - `PersistentLogStore`
 - `LogRecordPersistentEncoder`
 - `FileLogStore`
-- Read/replay are outside the M3.3.0 target.
+- Replay APIs are outside the M3.3.0 target.
+
+### Later milestones
+
 - Byte-stable export lands in M3.3.2.
 
 ### Boundaries for later work
@@ -37,8 +40,7 @@ Deferred APIs and roadmap ordering live in `README.md` and
 - API layer: `APIDesign.md`.
 - Format/spec layer: `FileFormatSpec.md`.
 - Compatibility layer: `APICompatibility.md`.
-- Implementation layer: `Sources/` and `Tests/` once implementation
-  lands.
+- Implementation layer: `Sources/` and `Tests/`.
 
 For persistence contract, the format/spec layer outranks API prose.
 
@@ -68,8 +70,14 @@ PersistentLogEnvelope
 PersistentLogStore  (protocol)
    |
    v
-FileLogStore        (planned concrete store; NDJSON segments on disk)
+FileLogStore        (concrete store; file-backed accepted-line persistence)
 ```
+
+The companion PlantUML diagram is non-normative and mirrors this
+layer map for visual review
+([source](Resources/PersistenceLogicalView.puml)).
+
+[![Persistence logical view](Resources/PersistenceLogicalView.svg)](Resources/PersistenceLogicalView.svg)
 
 Ownership boundaries:
 
@@ -78,7 +86,8 @@ Ownership boundaries:
 - The **envelope** is the target write unit accepted by stores.
 - The **store** owns local file I/O, not payload decoding or vendor
   delivery.
-- Replay/export file-format contract lives in `FileFormatSpec.md`.
+- Replay file-format contract and byte-stable export contract live in
+  `FileFormatSpec.md`.
 - Stores preserve producer sequence metadata without assigning it.
 
 See `Decisions/0002-envelope-storage.md` and
@@ -86,7 +95,8 @@ See `Decisions/0002-envelope-storage.md` and
 
 ## Failure model
 
-Target storage APIs are `async throws`; stores may narrow their error
-types. Logger-facing adapters remain infallible. Adapter diagnostics
-are non-normative and non-authoritative, and adapter retry policy is
-outside the persistence contract. See `Decisions/0005-failure-model.md`.
+Target storage APIs are `async throws`; concrete stores may narrow
+their contracts with typed throws. Logger-facing adapters remain
+infallible. Adapter diagnostics are non-normative and
+non-authoritative, and adapter retry policy is outside the persistence
+contract. See `Decisions/0005-failure-model.md`.

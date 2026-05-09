@@ -1,0 +1,62 @@
+@startuml
+
+title swift-logger-persistence logical view (non-normative)
+
+skinparam backgroundColor white
+skinparam defaultFontName Helvetica
+skinparam defaultTextAlignment center
+skinparam shadowing false
+skinparam linetype ortho
+skinparam nodesep 38
+skinparam ranksep 42
+skinparam ArrowColor #475569
+skinparam ArrowFontColor #334155
+skinparam ArrowThickness 1
+skinparam rectangle {
+  BorderColor #334155
+  FontColor #0F172A
+  RoundCorner 8
+}
+skinparam package {
+  BorderColor #CBD5E1
+  FontColor #334155
+  BackgroundColor #FFFFFF
+}
+
+top to bottom direction
+
+rectangle "Logger adapter\n(upstream; out of scope)" as Adapter #F8FAFC
+rectangle "LogRecordPersistentEncoder\nredaction + producer sequence" as Encoder #F8FAFC
+rectangle "PersistentLogEnvelope\npackage-owned write unit" as Envelope #F8FAFC
+rectangle "PersistentLogStore\n<<protocol>>\nappend / flush" as Store #EFF6FF
+rectangle "FileLogStore\nfile-backed accepted-line persistence" as FileStore #ECFDF5
+
+package "Optional file-store surfaces" {
+  rectangle "ExportableLogStore\n<<protocol>>" as Exportable #FFF7ED
+  rectangle "Byte-stable export\nexportLogs(to:)" as Export #FFF7ED
+  rectangle "Destructive removal\nremoveExportedLogs()" as Remove #FFF7ED
+  rectangle "Retention policy\n(deferred)" as Retention #FEF2F2
+}
+
+package "Contract owners" {
+  rectangle "FileFormatSpec.md\naccepted bytes\naccepted ordering\nrecoverable visibility" as Format #F5F3FF
+  rectangle "APIDesign.md\nAPI-observable guarantees" as API #F5F3FF
+  rectangle "APICompatibility.md\npublic diagnostics evolution" as Compatibility #F5F3FF
+}
+
+Adapter -down-> Encoder
+Encoder -down-> Envelope
+Envelope -down-> Store
+Store -down-> FileStore
+
+FileStore -down-> Exportable
+Exportable -down-> Export
+Export -down-> Remove
+Remove -down-> Retention
+
+FileStore -right-> Format
+Exportable -right-> API
+API -down-> Compatibility
+Format -[hidden]down-> API
+
+@enduml

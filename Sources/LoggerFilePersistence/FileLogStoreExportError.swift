@@ -2,11 +2,14 @@ import Foundation
 
 /// Public error surface for ``FileLogStore/exportLogs(to:)``.
 ///
-/// Owned by `LoggerFilePersistence`; the deferred portable
-/// `ExportableLogStore` protocol will introduce its own protocol-level
-/// error in a later milestone alongside `removeExportedLogs()`.
+/// Public export error surface owned by `LoggerFilePersistence`
+/// and governed by `Docs/APICompatibility.md`.
+/// ``ExportableLogStore`` exposes export and remove as untyped
+/// `throws`; the concrete `FileLogStore` refines each method with
+/// typed throws — `FileLogStoreExportError` here for export,
+/// `FileLogStoreRemoveError` for removal.
 public enum FileLogStoreExportError: Error, Sendable, Equatable {
-    /// A file-system step in the export pipeline failed.
+    /// An observable export-pipeline operation failed.
     case operationFailed(
         operation: FileLogStoreExportOperation,
         url: URL,
@@ -27,7 +30,8 @@ public enum FileLogStoreExportError: Error, Sendable, Equatable {
     case invalidDestination(reason: FileLogStoreExportInvalidDestinationReason)
 }
 
-/// File-system step in the byte-stable export pipeline.
+/// Observable export-pipeline operation classification used by
+/// `FileLogStoreExportError.operationFailed`.
 public enum FileLogStoreExportOperation: String, Sendable, Equatable {
     case enumerateSegments
     case openSegment
@@ -64,9 +68,10 @@ public enum FileLogStoreExportInvalidDestinationReason: Sendable, Equatable {
 
 // swiftlint:enable type_name
 
-/// Public corruption taxonomy surfaced when an export aborts on
-/// interior corruption. Mirrors the internal classification 1:1
-/// and is part of the file-store export compatibility contract.
+/// Public corruption taxonomy surfaced when export aborts on
+/// interior corruption. Projected from the internal corruption
+/// classifier and part of the file-store export compatibility
+/// contract.
 public enum FileLogStoreExportCorruptionClass: Sendable, Equatable {
     case malformedUTF8
     case malformedJSON

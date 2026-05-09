@@ -1,12 +1,12 @@
 # Corpus Spec
 
-Future conformance-corpus fixture plan for `swift-logger-persistence`.
+Conformance-corpus fixture plan for `swift-logger-persistence`.
 `FileFormatSpec.md` defines the normative corpus categories; this file
 keeps the detailed fixture candidates out of the main wire-format spec.
 
 Fixture bytes are immutable once released within a package major
-version. Fixture ordering is non-semantic unless explicitly stated
-otherwise.
+version. Fixture ordering is non-semantic and does not define
+accepted ordering unless explicitly stated otherwise.
 
 ## Corruption Fixtures
 
@@ -27,7 +27,8 @@ otherwise.
 - non-object JSON
 - empty lines
 - truncated escape sequences
-- duplicate commas / trailing commas
+- duplicate commas
+- trailing commas
 - malformed escaped solidus / reverse solidus chains
 - malformed surrogate pairs
 - escaped unicode surrogate edge chains
@@ -61,7 +62,8 @@ otherwise.
 
 - trailing partial line
 - mixed valid/corrupt interior lines
-- any other corruption class the package claims to classify
+- any additional corruption class introduced by the package
+  compatibility contract
 
 ## Semantic Validation Fixtures
 
@@ -74,12 +76,12 @@ otherwise.
 
 ## Deterministic Encoding Fixtures
 
-### Float Canonicalization
+### Float Canonical Spelling
 
 - over-limit canonical and non-canonical spellings
 - canonical vs non-canonical exponent forms
-- malformed exponent sign normalization
-- malformed canonical exponent normalization
+- malformed exponent sign spelling
+- malformed canonical exponent spelling
 
 ### Key Ordering
 

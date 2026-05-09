@@ -25,8 +25,9 @@ internal enum SegmentEnumeration {
 
     /// Returns the unrotated-segment URL when `log.ndjson` is
     /// present and is a regular file. Single-call wrapper around
-    /// ``SegmentRoot``: opens the configured root with `O_NOFOLLOW`,
-    /// inspects via `fstatat`, and releases the descriptor before
+    /// ``SegmentRoot``: opens the configured root as a
+    /// descriptor-relative discovery root, inspects the entry
+    /// descriptor-relatively, and releases the descriptor before
     /// returning.
     static func unrotatedSegmentURLIfRegular(
         in directory: URL,
@@ -100,30 +101,52 @@ internal enum SegmentEnumeration {
     private static func isASCIIDigit(_ byte: UInt8) -> Bool {
         byte >= 0x30 && byte <= 0x39
     }
+
+    /// Stable, package-owned identifier carried in
+    /// `FileSystemErrorContext.description` of every
+    /// duplicate-rotated-sequence rejection.
+    internal static let duplicateRotatedSegmentSequenceMarker = "duplicateRotatedSegmentSequence"
+
+    /// Returns `true` when `error` is the duplicate-
+    /// rotated-sequence rejection produced by
+    /// ``SegmentRoot/enumerateRotatedSegments()`` or
+    /// ``SegmentRoot/highestRotatedSegmentSequence()``.
+    /// Centralizes the classifier so consumers do not parse
+    /// `FileSystemErrorContext.description` directly.
+    internal static func isDuplicateRotatedSegmentSequenceError(
+        _ error: InternalReadError
+    ) -> Bool {
+        guard case let .operationFailed(_, _, context) = error else {
+            return false
+        }
+        return context.domain == FileSystemErrorContext.packageDomain
+            && context.code == nil
+            && context.description == duplicateRotatedSegmentSequenceMarker
+    }
 }
 
 // MARK: - SegmentRoot (descriptor-relative discovery)
 
-/// Stable `(st_dev, st_ino)` identity for a configured root.
+/// Stable directory identity captured from a filesystem
+/// metadata snapshot.
 internal struct DirectoryIdentity: Equatable, Sendable {
+    // periphery:ignore - Periphery does not trace synthesized Equatable reads.
     let dev: dev_t
+    // periphery:ignore - Periphery does not trace synthesized Equatable reads.
     let ino: ino_t
 
-    /// Builds the identity from a `stat` snapshot.
+    /// Builds stable directory identity from a filesystem
+    /// metadata snapshot.
     init(_ statBuf: stat) {
         dev = statBuf.st_dev
         ino = statBuf.st_ino
-    }
-
-    static func == (lhs: DirectoryIdentity, rhs: DirectoryIdentity) -> Bool {
-        lhs.dev == rhs.dev && lhs.ino == rhs.ino
     }
 }
 
 /// Descriptor-relative handle for segment discovery and segment opens.
 internal final class SegmentRoot: @unchecked Sendable {
     let directoryURL: URL
-    private var rootFD: Int32
+    internal private(set) var rootFD: Int32
 
     private init(directoryURL: URL, rootFD: Int32) {
         self.directoryURL = directoryURL
@@ -132,7 +155,7 @@ internal final class SegmentRoot: @unchecked Sendable {
 
     deinit {
         if rootFD >= 0 {
-            Darwin.close(rootFD)
+            _ = Darwin.close(rootFD)
         }
     }
 
@@ -140,12 +163,12 @@ internal final class SegmentRoot: @unchecked Sendable {
     /// segment-open calls on this instance are invalid.
     func close() {
         if rootFD >= 0 {
-            Darwin.close(rootFD)
+            _ = Darwin.close(rootFD)
             rootFD = -1
         }
     }
 
-    /// Opens `directory` as an `O_NOFOLLOW` directory descriptor.
+    /// Opens `directory` as a descriptor-relative discovery root.
     /// Returns `nil` for an absent root (`ENOENT`); throws
     /// `.operationFailed(.enumerateSegments)` for non-directory
     /// (`ENOTDIR`), symlinked root (`ELOOP`), or any other open
@@ -167,18 +190,18 @@ internal final class SegmentRoot: @unchecked Sendable {
                 context: FileSystemErrorContext(
                     domain: NSPOSIXErrorDomain,
                     code: Int(savedErrno),
-                    description: "open(O_DIRECTORY|O_NOFOLLOW) failed"
+                    description: "descriptor-relative root open failed"
                 )
             )
         }
         return SegmentRoot(directoryURL: directory, rootFD: descriptor)
     }
 
-    /// Asserts the held descriptor still refers to the same inode
-    /// captured by `expected`. Used by the writer to bind a
-    /// pre-open `lstat` snapshot to the post-open `fstat` snapshot
-    /// so a swap of the configured path between create/validate
-    /// and open is rejected.
+    /// Asserts the held descriptor still refers to the same
+    /// directory identity captured by `expected`. Used by the writer
+    /// to bind pre-open directory validation to the held descriptor
+    /// identity so a configured-path swap between validation and
+    /// descriptor acquisition is rejected.
     func validateIdentity(
         matches expected: DirectoryIdentity
     ) throws(InternalReadError) {
@@ -191,7 +214,7 @@ internal final class SegmentRoot: @unchecked Sendable {
                 context: FileSystemErrorContext(
                     domain: NSPOSIXErrorDomain,
                     code: Int(savedErrno),
-                    description: "fstatFailed"
+                    description: "directory identity read failed"
                 )
             )
         }
@@ -203,17 +226,16 @@ internal final class SegmentRoot: @unchecked Sendable {
                 context: FileSystemErrorContext(
                     domain: FileSystemErrorContext.packageDomain,
                     code: nil,
-                    description: "rootIdentityMismatch"
+                    description: "root identity mismatch"
                 )
             )
         }
     }
 
     /// Returns the unrotated-segment URL when `log.ndjson` exists
-    /// and is a regular file. Inspection uses `fstatat(rootFD, ...,
-    /// AT_SYMLINK_NOFOLLOW)`; absent entry maps to `nil`; any
-    /// other entry topology (symlink, directory, fifo, device,
-    /// socket) maps to `.operationFailed(.enumerateSegments)`.
+    /// and is a regular file. Inspection is descriptor-relative;
+    /// absent entry maps to `nil`; any other entry topology
+    /// maps to `.operationFailed(.enumerateSegments)`.
     func unrotatedSegmentURLIfRegular() throws(InternalReadError) -> URL? {
         let name = SegmentEnumeration.unrotatedSegmentFileName
         let url = directoryURL.appendingPathComponent(name)
@@ -227,7 +249,7 @@ internal final class SegmentRoot: @unchecked Sendable {
                 context: FileSystemErrorContext(
                     domain: FileSystemErrorContext.packageDomain,
                     code: nil,
-                    description: "unrotatedSegmentNotRegularFile"
+                    description: "unrotated segment is not a regular file"
                 )
             )
         }
@@ -235,8 +257,8 @@ internal final class SegmentRoot: @unchecked Sendable {
     }
 
     /// Returns rotated segments in deterministic numeric order.
-    /// Filters non-regular entries; rejects duplicate numeric
-    /// sequences with a deterministic diagnostic URL.
+    /// Skips non-regular rotated entries and rejects duplicate
+    /// numeric sequences with a deterministic diagnostic URL.
     func enumerateRotatedSegments() throws(InternalReadError) -> [(url: URL, sequence: UInt64)] {
         let names = try collectEntryNames()
         var matched: [(url: URL, sequence: UInt64)] = []
@@ -259,11 +281,12 @@ internal final class SegmentRoot: @unchecked Sendable {
         return matched
     }
 
-    /// Returns the highest rotated-segment sequence via a linear
-    /// streaming scan.
+    /// Returns the highest rotated-segment sequence through
+    /// descriptor-relative enumeration without materializing
+    /// the full sorted segment list.
     ///
-    /// Duplicate diagnostics are deterministic and match the sorted
-    /// enumeration path.
+    /// Duplicate diagnostics are deterministic and match
+    /// `enumerateRotatedSegments()`.
     func highestRotatedSegmentSequence() throws(InternalReadError) -> UInt64? {
         var tracker = DuplicateRotatedSegmentTracker()
         try forEachEntryName { name throws(InternalReadError) in
@@ -281,9 +304,8 @@ internal final class SegmentRoot: @unchecked Sendable {
         return tracker.maxSequence
     }
 
-    /// Opens a segment for reading via `openat(rootFD, name,
-    /// O_RDONLY | O_NOFOLLOW | O_CLOEXEC)` and validates the
-    /// resulting descriptor as a regular file.
+    /// Opens a segment for descriptor-relative reading and
+    /// validates the resulting descriptor as a regular file.
     func openSegmentForReading(
         url: URL
     ) throws(InternalReadError) -> FileHandle {
@@ -401,7 +423,9 @@ internal final class SegmentRoot: @unchecked Sendable {
         }
         guard let dirHandle = fdopendir(dirFD) else {
             let savedErrno = errno
-            Darwin.close(dirFD)
+            // Best-effort cleanup before throwing; close failure
+            // does not change the projected enumerate-segments error.
+            _ = Darwin.close(dirFD)
             throw .operationFailed(
                 operation: .enumerateSegments,
                 url: directoryURL,
@@ -463,7 +487,7 @@ internal final class SegmentRoot: @unchecked Sendable {
             context: FileSystemErrorContext(
                 domain: FileSystemErrorContext.packageDomain,
                 code: nil,
-                description: "duplicateRotatedSegmentSequence"
+                description: SegmentEnumeration.duplicateRotatedSegmentSequenceMarker
             )
         )
     }
@@ -483,7 +507,9 @@ private func validateRegularFileFD(
     var statBuf = stat()
     if fstat(descriptor, &statBuf) != 0 {
         let savedErrno = errno
-        Darwin.close(descriptor)
+        // Best-effort cleanup before throwing; close failure
+        // does not change the projected open-segment error.
+        _ = Darwin.close(descriptor)
         throw .operationFailed(
             operation: .openSegment,
             url: url,
@@ -495,7 +521,9 @@ private func validateRegularFileFD(
         )
     }
     guard (statBuf.st_mode & S_IFMT) == S_IFREG else {
-        Darwin.close(descriptor)
+        // Best-effort cleanup before throwing; close failure
+        // does not change the projected open-segment error.
+        _ = Darwin.close(descriptor)
         throw .operationFailed(
             operation: .openSegment,
             url: url,
