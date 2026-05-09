@@ -5,7 +5,7 @@ Non-normative system map for `swift-logger-persistence`.
 ## Scope
 
 Layer map for package-local persistence APIs and file-backed storage.
-Normative durability contract lives in `FileFormatSpec.md`.
+Normative persistence contract lives in `FileFormatSpec.md`.
 
 ### M3.3.0 target shape
 
@@ -18,9 +18,10 @@ storage shape.
 - `FileLogStore`
 - Replay APIs are outside the M3.3.0 target.
 
-### Later milestones
+### Current lifecycle additions
 
-- Byte-stable export lands in M3.3.2.
+- M3.3.2 adds byte-stable export, destructive removal, and
+  count/byte retention.
 
 ### Boundaries for later work
 

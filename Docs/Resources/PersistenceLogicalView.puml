@@ -35,7 +35,7 @@ package "Optional file-store surfaces" {
   rectangle "ExportableLogStore\n<<protocol>>" as Exportable #FFF7ED
   rectangle "Byte-stable export\nexportLogs(to:)" as Export #FFF7ED
   rectangle "Destructive removal\nremoveExportedLogs()" as Remove #FFF7ED
-  rectangle "Retention policy\n(deferred)" as Retention #FEF2F2
+  rectangle "Retention policy\ncount/byte (shipped); age (deferred)" as Retention #FFF7ED
 }
 
 package "Contract owners" {

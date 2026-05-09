@@ -90,72 +90,38 @@ public actor FileLogStore: PersistentLogStore {
     /// actor isolation.
     internal var onAfterWritingTemporaryBytesForTesting: (@Sendable () async throws -> Void)?
 
-    /// TEST-ONLY hook fired by the export critical section after
-    /// the temp file has been closed and immediately before the
-    /// atomic `renameatx_np(... RENAME_EXCL)` commit. Lets tests
-    /// race the destination URL deterministically (e.g. plant a
-    /// pre-existing entry between final pre-check and commit) so
-    /// the no-overwrite + EEXIST re-probe paths are exercised.
-    /// Throws so test setup failures surface as a typed export
-    /// error instead of silently corrupting the test's premise.
+    /// TEST-ONLY: installs a seam before export commit.
+    /// Thrown errors project to `.commitDestination`.
     internal var onBeforeCommitForTesting: (@Sendable () throws -> Void)?
 
-    /// TEST-ONLY hook fired at the end of `append` after the
-    /// admitted bytes have reached the active segment. Lets tests
-    /// observe append completion without a sleep when proving
-    /// single-flight serialization against `exportLogs(to:)`.
+    /// TEST-ONLY: installs a seam after admitted append bytes reach storage.
     internal var onAfterAppendForTesting: (@Sendable () -> Void)?
 
-    /// TEST-ONLY hook fired at the very first instruction of
-    /// `append`, after the call has acquired the operation
-    /// boundary but before any append work runs. Combined with
-    /// ``onAfterAppendForTesting`` this lets tests record an
-    /// `[append-entered, append-completed]` interval that the
-    /// nonreentrant operation boundary guarantees never overlaps
-    /// an export's gate interval.
+    /// TEST-ONLY: installs a seam after append acquires the operation boundary.
     internal var onBeforeAppendForTesting: (@Sendable () -> Void)?
 
-    /// TEST-ONLY hook fired at the start of
-    /// `closeExportTemporary`. A throw simulates a `close(2)`
-    /// failure deterministically so the cleanup contract can be
-    /// exercised without a filesystem-level fault. The
-    /// descriptor is best-effort closed before the hook's error
-    /// is projected onto `.closeTemporaryDestination`.
+    /// TEST-ONLY: installs a seam before export temp close.
+    /// Thrown errors project to `.closeTemporaryDestination`.
     internal var onCloseTemporaryDestinationForTesting: (@Sendable () throws -> Void)?
 
-    /// TEST-ONLY async rendezvous hook fired before each
-    /// per-entry removal mutation, after `removeExportedLogs()`
-    /// has acquired the operation boundary. Receives the entry
-    /// URL. Tests may suspend here to prove concurrent append/export
-    /// callers cannot cross the nonreentrant operation boundary, or
-    /// throw to simulate a removal step failure deterministically.
+    /// TEST-ONLY: installs a seam before each per-entry removal mutation.
+    /// Thrown errors project to `.validateBoundary`.
     internal var onBeforeProcessRemovalEntryForTesting: (@Sendable (URL) async throws -> Void)?
 
-    /// TEST-ONLY hook fired between the destructive
-    /// segment-mutation step and the active-writer reopen
-    /// step. A throw simulates a reopen failure that must
-    /// surface to the caller while leaving the destructive
-    /// mutation already advanced past the entry in the
-    /// boundary tail.
+    /// TEST-ONLY: installs a seam before active-writer reopen after removal mutation.
+    /// Thrown errors project to `.reopenActiveSegment`.
     internal var onBeforeReopenActiveSegmentForTesting: (@Sendable (URL) throws -> Void)?
 
-    /// TEST-ONLY hook fired immediately before the compaction
-    /// read descriptor is opened, after the per-entry
-    /// revalidation step has succeeded. Lets tests mutate the
-    /// boundary segment in the narrow window between per-entry
-    /// revalidation and compaction-read revalidation so the
-    /// inside-`compactSegment` re-check fails closed with
-    /// `.removalBoundaryStale` and no compaction temp is left
-    /// behind.
+    /// TEST-ONLY: installs a seam before the compaction read open.
+    /// Thrown errors project to `.openSegment`.
     internal var onBeforeOpenCompactionReadForTesting: (@Sendable (URL) throws -> Void)?
 
-    /// TEST-ONLY classification seam for stale-boundary rotated-topology
-    /// validation. When non-nil, the override bypasses real
-    /// descriptor-relative rotated-segment traversal and injects a
-    /// synthetic `InternalReadError` classification so tests can
-    /// deterministically exercise stale-boundary dispatch paths
-    /// without constructing matching on-disk topology.
+    /// TEST-ONLY: rotated-topology classification override.
     internal var rotatedTopologyOverrideForTesting: (@Sendable () -> InternalReadError?)?
+
+    /// TEST-ONLY: installs a seam before each retention segment deletion.
+    /// Thrown errors project to `.enforceRetention`.
+    internal var onBeforeRetentionUnlinkForTesting: (@Sendable (URL) throws -> Void)?
 
     /// Creates a file-backed store.
     ///
@@ -189,14 +155,16 @@ public actor FileLogStore: PersistentLogStore {
     ///   invariant violation. Validation failures and encoding
     ///   failures occur before any storage mutation; rejected
     ///   envelopes never extend the recoverable prefix.
+    ///
+    ///   If retention deletion fails after admitted bytes are written,
+    ///   `append(_:)` throws `.operationFailed(.enforceRetention, ...)`.
+    ///   In that case the triggering envelope remains accepted; callers
+    ///   must not retry it as if admission failed.
     public func append(
         _ envelope: PersistentLogEnvelope
     ) async throws(FileLogStoreError) {
         let lease = await operationBoundary.enter()
-        // Production-balanced enter/exit always matches, so
-        // the result is discarded here; `defer` has no
-        // practical throwing path. The mismatch contract is
-        // pinned by `OperationBoundary` unit coverage.
+        // Balanced enter/exit is covered by OperationBoundary tests.
         defer { _ = operationBoundary.exit(lease) }
         onBeforeAppendForTesting?()
         drainPendingCloseHandles()
@@ -229,6 +197,8 @@ public actor FileLogStore: PersistentLogStore {
                 context: FileSystemErrorContext(from: error)
             )
         }
+        // Retention runs inside the append boundary after admission.
+        try enforceRetention()
         onAfterAppendForTesting?()
     }
 
@@ -261,10 +231,7 @@ public actor FileLogStore: PersistentLogStore {
     /// Best-effort local synchronization boundary for accepted appends.
     public func flush() async throws(FileLogStoreError) {
         let lease = await operationBoundary.enter()
-        // Production-balanced enter/exit always matches, so
-        // the result is discarded here; `defer` has no
-        // practical throwing path. The mismatch contract is
-        // pinned by `OperationBoundary` unit coverage.
+        // Balanced enter/exit is covered by OperationBoundary tests.
         defer { _ = operationBoundary.exit(lease) }
         drainPendingCloseHandles()
         guard let active = activeSegment else { return }
@@ -363,9 +330,7 @@ public actor FileLogStore: PersistentLogStore {
         }
         let root = try ensureWriterRoot()
         let url = rotatedSegmentURL(sequence: nextSequence)
-        // Activate the next segment before closing the previous
-        // handle. Rotation continues through the held root descriptor;
-        // close failures are retained for deferred close.
+        // Activate next segment before closing the previous handle.
         let next = try openNewSegment(root: root, url: url, sequence: nextSequence)
         activeSegment = next
         do {
@@ -393,8 +358,7 @@ public actor FileLogStore: PersistentLogStore {
         } catch {
             throw FileLogStoreError(projecting: error, onto: .openWritableSegment)
         }
-        // If trim/seek fails before ownership transfer, the
-        // opened handle is closed or retained for deferred close.
+        // Close or retain the handle until ownership transfers.
         var ownershipTransferred = false
         defer {
             if !ownershipTransferred {
@@ -437,7 +401,6 @@ public actor FileLogStore: PersistentLogStore {
         handle: FileHandle,
         segmentURL: URL
     ) throws(FileLogStoreError) {
-        // Reopen positions the writer at the recoverable-prefix boundary.
         let resolution: RecoverablePrefixScanner.BoundaryResolution
         do {
             resolution = try RecoverablePrefixScanner.resolveBoundary(
@@ -638,14 +601,30 @@ extension FileLogStore {
         /// Segment rotation policy.
         public var rotation: RotationPolicy
 
+        /// Segment retention policy enforced after each successful
+        /// append admission.
+        public var retention: RetentionPolicy
+
         public init(directory: URL) {
             self.directory = directory
             rotation = .never
+            retention = .unlimited
         }
 
         public init(directory: URL, rotation: RotationPolicy) {
             self.directory = directory
             self.rotation = rotation
+            retention = .unlimited
+        }
+
+        public init(
+            directory: URL,
+            rotation: RotationPolicy,
+            retention: RetentionPolicy
+        ) {
+            self.directory = directory
+            self.rotation = rotation
+            self.retention = retention
         }
     }
 }

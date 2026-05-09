@@ -158,9 +158,10 @@ M3.3.0 baseline capabilities:
 
 - append/flush-only persistence API
 - no replay APIs
-- deferred retention
+- no retention enforcement
 
-M3.3.2 adds byte-stable export and destructive removal below.
+M3.3.2 adds byte-stable export, destructive removal, and count/byte
+retention below. Age-based retention remains deferred.
 
 Segment topology is outside the portable compatibility contract.
 
@@ -220,7 +221,8 @@ Serialization semantics:
 Atomicity contract:
 
 - Any pre-existing entry at the destination URL yields
-  `.invalidDestination(reason:)`; the destination is not modified.
+  `.invalidDestination(reason:)`; the final destination entry is not
+  modified.
 - Export writes to a unique temporary file inside a private
   temporary directory in the destination parent using no-overwrite
   creation semantics.
@@ -327,31 +329,25 @@ Failure and retry contract:
 - Directory-entry durability after unlink or replace is best-effort
   and must not be overclaimed.
 
-## Future shape (deferred)
+## Rotation and retention
 
-Deferred non-normative sketches.
-
-### Retention policy
-
-This sketch shows the joint future shape across rotation (LGP-6, shipped
-in M3.3.1) and retention (LGP-7, deferred). Members marked with
-`// Deferred` are not part of the current API surface; they document
-the slot reserved for a later milestone.
-
-Configuration validation is factory-owned; composition is
-non-throwing.
+Rotation (LGP-6, shipped in M3.3.1) and retention (LGP-7, shipped in
+M3.3.2) compose through ``FileLogStore.Configuration``. Configuration
+validation is factory-owned; composition is non-throwing.
 
 ```text
 extension FileLogStore.Configuration {
+    public init(directory: URL)
     public init(directory: URL, rotation: RotationPolicy)
     public init(
         directory: URL,
         rotation: RotationPolicy,
         retention: RetentionPolicy
-    )                                                       // Deferred
+    )
 
+    public var directory: URL
     public var rotation: RotationPolicy
-    public var retention: RetentionPolicy                   // Deferred
+    public var retention: RetentionPolicy
 }
 
 public struct RotationPolicy: Sendable, Equatable {
@@ -361,14 +357,10 @@ public struct RotationPolicy: Sendable, Equatable {
     ) throws(FileLogStoreConfigurationError) -> Self
 }
 
-public struct RetentionPolicy: Sendable, Equatable {        // Deferred
+public struct RetentionPolicy: Sendable, Equatable {
     public static let unlimited: Self
     public static func maxSegments(
         _ count: Int
-    ) throws(FileLogStoreConfigurationError) -> Self
-    /// Monotonic elapsed-time policy; not calendar/DST age.
-    public static func maxAge(
-        seconds: Int64
     ) throws(FileLogStoreConfigurationError) -> Self
     public static func maxTotalBytes(
         _ bytes: Int
@@ -377,14 +369,54 @@ public struct RetentionPolicy: Sendable, Equatable {        // Deferred
 
 public enum FileLogStoreConfigurationError: Error, Sendable, Equatable {
     case invalidRotationPolicy
-    case invalidRetentionPolicy                             // Deferred
+    case invalidRetentionPolicy
 }
 ```
+
+`Configuration(directory:)` and `Configuration(directory:rotation:)` set
+`retention = .unlimited`.
 
 `RotationPolicy.bySize(maxSegmentBytes:)` rejects any cap below
 `FileLogStore.maxEncodedLineBytes`, because a single canonical line that
 fits the encoded-line cap must also fit a fresh empty segment; otherwise
 admission could produce a line that no segment could hold.
+
+`RetentionPolicy.maxSegments(_:)` rejects values below `1`. A retention
+cap of zero would force retention to delete the active writer segment
+to satisfy the bound, which retention is forbidden from doing.
+
+`RetentionPolicy.maxTotalBytes(_:)` rejects values below
+`FileLogStore.maxEncodedLineBytes`. A canonical line that fits the
+encoded-line cap must be admittable into a fresh empty segment; a
+smaller cap would force retention to consider deleting a segment
+containing the line that just admitted it.
+
+Retention enforcement runs after a successful `append` admission while
+the append still holds the nonreentrant operation boundary. Concurrent
+`append`, `flush`, `exportLogs(to:)`, and `removeExportedLogs()`
+callers wait until the append plus retention enforcement releases that
+boundary. Rejected appends never trigger retention.
+
+Under `RotationPolicy.bySize(maxSegmentBytes:)`, retention enumerates
+regular rotated segments by numeric sequence and deletes whole rotated
+segments only — never the active writer segment, never inside-segment
+prefix bytes, and never an accepted line. Under `RotationPolicy.never`
+every retention policy is a no-op because there is only one unrotated
+segment to consider and prefix retention requires a separate boundary
+model. `RetentionPolicy.unlimited` is a no-op under any rotation.
+
+If retention deletion fails, the triggering append remains admitted
+and the caller receives `.operationFailed(.enforceRetention, url:
+..., context: ...)`. Later append/flush/export/remove operations
+operate on the recoverable topology left by the failed pass.
+Directory-entry durability after unlink is best-effort and must not
+be overclaimed.
+
+Retention does not create, consume, or modify the in-memory removal
+boundary. A retention pass that deletes a segment named in an older
+captured export boundary makes that boundary stale; the next
+`removeExportedLogs()` then fails closed with
+`.removalBoundaryStale`.
 
 Segment topology under `bySize` is a policy contract, not part of the
 portable wire format: rotated segments use filenames of the form
@@ -396,6 +428,26 @@ reopen and rotation boundaries.
 
 Calendar-day rotation is omitted until timezone ownership, DST handling,
 and boundary monotonicity are defined.
+
+## Future shape (deferred)
+
+Deferred non-normative sketches.
+
+### Age-based retention
+
+`RetentionPolicy.maxAge(seconds:)` is deferred. Age semantics require
+an explicit source-of-truth decision (filesystem metadata vs.
+accepted-line timestamps) and must not be guessed in the same
+milestone as count and byte retention.
+
+```text
+public struct RetentionPolicy: Sendable, Equatable {
+    /// Monotonic elapsed-time policy; not calendar/DST age.
+    public static func maxAge(
+        seconds: Int64
+    ) throws(FileLogStoreConfigurationError) -> Self        // Deferred
+}
+```
 
 ### File protection -- when actually applied at write
 

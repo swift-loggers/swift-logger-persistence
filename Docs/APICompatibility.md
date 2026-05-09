@@ -17,13 +17,15 @@ This policy applies to:
 - `FileLogStoreExportCorruptionClass`
 - `FileLogStoreRemoveError`
 - `FileLogStoreRemoveOperation`
+- `FileLogStoreConfigurationError`
 - `PersistenceInvariantError`
 
 ## Evolution Contract
 
 ### Enum Evolution
 
-- External switches should include an unknown/default branch.
+- External consumers should treat diagnostic enums as non-exhaustive
+  unless a future release explicitly marks one as `@frozen`.
 - Cases are append-only within one package major version.
 - Existing cases are not removed, renamed, or repurposed except in a
   declared source-breaking release.
@@ -44,8 +46,6 @@ This policy applies to:
   decision.
 - New cases may be added when new diagnostics land. Release notes call
   out additions because they can break exhaustive switches.
-- Diagnostic enums are non-frozen for external consumers unless a future
-  release explicitly marks one as `@frozen`.
 
 ### Format-Owned Contracts
 

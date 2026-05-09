@@ -1,14 +1,15 @@
 # Export and Remove Design
 
-Non-normative design notes for the shipped byte-stable export contract
-and destructive remove lifecycle. Locked API guarantees live in
-`Docs/APIDesign.md`; file-format semantics live in `Docs/FileFormatSpec.md`.
+Non-normative design notes for the shipped byte-stable export
+contract, destructive remove lifecycle, and count/byte retention
+policy. Locked API guarantees live in `Docs/APIDesign.md`;
+file-format semantics live in `Docs/FileFormatSpec.md`.
 
 ## Status
 
-The byte-stable export, export-serialization, protocol ownership, and
-destructive remove contracts are implemented and locked. Retention
-policy remains deferred.
+The byte-stable export, export-serialization, protocol ownership,
+destructive remove, and count/byte retention contracts are
+implemented and locked. Age-based retention remains deferred.
 
 ## Protocol Shape (locked)
 
@@ -63,8 +64,15 @@ independently from byte-stable export.
 | How does failure retry work? | Completed destructive segment steps are not retried. The remaining in-memory boundary is retained for retry and cleared only after full success. |
 | How are stale boundaries handled? | Missing segments, identity mismatch, insufficient size, and ambiguous rotated topology fail closed as `.removalBoundaryStale`. |
 
-## Deferred Retention Policy
+## Retention Policy
 
-Retention policy remains separate from `removeExportedLogs()`.
-Age, size, and count caps are policy decisions layered on top of the
-destructive removal mechanics.
+Retention policy remains a separate layer from
+`removeExportedLogs()`. Count- and byte-cap retention
+(`.maxSegments`, `.maxTotalBytes`) ship in M3.3.2: retention
+runs after a successful append admission, holds the same
+nonreentrant operation boundary append already holds, and deletes
+whole rotated segments only — never the active writer segment, never
+inside-segment prefix bytes. Age-based retention
+(`.maxAge(seconds:)`) remains deferred until source-of-truth
+semantics (filesystem metadata vs. accepted-line timestamps) are
+locked.

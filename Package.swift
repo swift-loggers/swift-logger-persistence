@@ -69,7 +69,8 @@ let package = Package(
                 "ByteStableExportSQECoverage.md",
                 "CoverageMap.md",
                 "RecoveryDiscoverySQECoverage.md",
-                "RemoveLifecycleSQECoverage.md"
+                "RemoveLifecycleSQECoverage.md",
+                "RetentionPolicySQECoverage.md"
             ],
             resources: [
                 .copy("Fixtures")
