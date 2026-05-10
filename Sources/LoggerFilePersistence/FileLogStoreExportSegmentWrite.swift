@@ -138,7 +138,7 @@ extension FileLogStore {
                     context: FileSystemErrorContext(
                         domain: FileSystemErrorContext.packageDomain,
                         code: nil,
-                        description: "unexpectedEOFBeforeBoundary"
+                        description: "unexpected EOF before boundary"
                     )
                 )
             }
@@ -151,7 +151,7 @@ extension FileLogStore {
                     context: FileSystemErrorContext(
                         domain: FileSystemErrorContext.packageDomain,
                         code: nil,
-                        description: "readPastBoundary"
+                        description: "read past boundary"
                     )
                 )
             }
@@ -186,7 +186,7 @@ extension FileLogStore {
                         context: FileSystemErrorContext(
                             domain: NSPOSIXErrorDomain,
                             code: Int(savedErrno),
-                            description: "write failed"
+                            description: "export temporary write failed"
                         )
                     )
                     return
@@ -198,7 +198,7 @@ extension FileLogStore {
                         context: FileSystemErrorContext(
                             domain: FileSystemErrorContext.packageDomain,
                             code: nil,
-                            description: "writeReturnedZero"
+                            description: "export temporary write returned zero"
                         )
                     )
                     return

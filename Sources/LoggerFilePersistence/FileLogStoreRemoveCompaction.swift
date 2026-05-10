@@ -1,15 +1,14 @@
+// swiftlint:disable file_length - Boundary revalidation, compaction temp create with permission preservation, post-boundary suffix range guard and streaming, and atomic replace are kept in one file so the compaction contract stays auditable in one place.
 import Darwin
 import Foundation
 
 // MARK: - Boundary re-validation
 
 extension FileLogStore {
-    /// Re-validates every boundary entry against current
-    /// on-disk topology BEFORE any mutation runs. Detects
-    /// ambiguous rotated topology (duplicate sequences) for
-    /// `.bySize` stores, then per-entry identity and size
-    /// mismatches. All mismatches surface as
-    /// `.removalBoundaryStale`; the disk is not touched.
+    /// Revalidates removal boundary entries before mutation.
+    ///
+    /// Duplicate rotated topology and per-entry identity/size mismatches
+    /// surface as `.removalBoundaryStale`; no disk mutation occurs.
     func validateRemovalBoundary(
         _ entries: [RemovalBoundaryEntry],
         root: SegmentRoot
@@ -34,12 +33,8 @@ extension FileLogStore {
         }
     }
 
-    /// Branches on the centralized
-    /// ``SegmentEnumeration/isDuplicateRotatedSegmentSequenceError(_:)``
-    /// classifier: a duplicate-sequence rejection becomes
-    /// `.removalBoundaryStale`; every other enumeration
-    /// failure becomes `.operationFailed(.validateBoundary, ...)`
-    /// and preserves the underlying URL and context.
+    /// Projects duplicate rotated topology to `.removalBoundaryStale`.
+    /// Other enumeration failures remain `.operationFailed(.validateBoundary)`.
     private func projectRotatedTopologyEnumerationFailure(
         _ error: InternalReadError
     ) -> FileLogStoreRemoveError {
@@ -177,13 +172,11 @@ extension FileLogStore {
     /// boundary-covered segment with the compacted replacement
     /// segment.
     ///
-    /// The boundary segment's identity and size are revalidated
-    /// against the freshly opened compaction read descriptor —
-    /// not against the per-entry-revalidation snapshot — so a
-    /// swap or truncate landing between per-entry revalidation
-    /// and compaction read fails closed with
-    /// `.removalBoundaryStale` before any temp creation or
-    /// atomic replacement runs.
+    /// The boundary segment's identity and size are revalidated at
+    /// compaction-read open AND immediately before the atomic
+    /// replacement; a swap or truncate landing in either window
+    /// fails closed with `.removalBoundaryStale` before the
+    /// replacement runs.
     func compactSegment(
         rootFD: Int32,
         entry: RemovalBoundaryEntry,
@@ -227,21 +220,31 @@ extension FileLogStore {
             url: entry.url
         )
         try syncCompactionTemporary(tempFD: tempFD, url: entry.url)
-        // Mark the compaction temporary's raw fd as consumed
-        // before invoking close. The `pendingCloseHandles`
-        // queue retains owning `FileHandle`s for deferred close;
-        // the compaction temporary is a raw descriptor closed
-        // explicitly here. After a failed `close(2)` the fd is
-        // in an undefined state and must not be closed a second
-        // time, so the deferred cleanup skips it. Temp unlink
-        // cleanup still runs because `tempCommitted` stays
-        // false until the atomic replacement succeeds.
+        // Raw descriptor close consumes `tempFD`; failed close leaves it
+        // undefined, so deferred cleanup must not close it again.
         tempFDIsOpen = false
         try closeCompactionTemporary(tempFD: tempFD, url: entry.url)
+        try fireBeforeReplaceSegmentRevalidationSeam(url: entry.url)
+        try revalidateEntry(entry, rootFD: rootFD)
         try replaceSegmentAtomic(
             rootFD: rootFD, tempLeaf: tempLeaf, finalLeaf: leaf, url: entry.url
         )
         tempCommitted = true
+    }
+
+    private func fireBeforeReplaceSegmentRevalidationSeam(
+        url: URL
+    ) throws(FileLogStoreRemoveError) {
+        guard let testSeam = onBeforePreReplaceRevalidateForTesting else { return }
+        do {
+            try testSeam(url)
+        } catch {
+            throw .operationFailed(
+                operation: .validateBoundary,
+                url: url,
+                context: FileSystemErrorContext(from: error)
+            )
+        }
     }
 
     private func fireBeforeOpenCompactionReadSeam(
@@ -259,29 +262,15 @@ extension FileLogStore {
         }
     }
 
-    /// State derived from the compaction-time revalidation of
-    /// the boundary segment. Captures the suffix length used to
-    /// size the compaction temporary and the permission bits
-    /// (`0o777`) the replacement segment must carry across the
-    /// atomic rename. Special mode bits (SUID, SGID, sticky)
-    /// are not part of the compaction permission-preservation
-    /// contract.
+    /// Compaction-time boundary state derived from the current segment
+    /// descriptor.
     fileprivate struct CompactionReadState {
         let suffixLength: UInt64
         let replacementPermissions: mode_t
     }
 
-    /// Re-derives the post-boundary suffix length and the
-    /// boundary segment's permission bits (`0o777`) from
-    /// `readFD`'s current `fstat(2)`. The compaction-time
-    /// revalidation rejects a boundary segment whose identity
-    /// no longer matches the captured boundary entry or whose
-    /// size dropped below `entry.exportedPrefixEnd` after the
-    /// per-entry revalidation step completed. Permission bits
-    /// flow into the compaction temporary so the atomic
-    /// replacement preserves the boundary segment's original
-    /// `0o777` permission bits rather than picking up the
-    /// active umask at compaction time.
+    /// Revalidates the compaction read descriptor and derives suffix
+    /// length plus owner-class replacement permissions.
     private func revalidatedCompactionReadState(
         readFD: Int32, entry: RemovalBoundaryEntry
     ) throws(FileLogStoreRemoveError) -> CompactionReadState {
@@ -290,18 +279,18 @@ extension FileLogStore {
         )
         try assertBoundaryIdentityAndSize(entry: entry, statBuf: statBuf)
         let suffixLength = UInt64(statBuf.st_size) - entry.exportedPrefixEnd
-        let replacementPermissions = mode_t(statBuf.st_mode & 0o777)
+        // Preserve owner-class bits only; compaction must not widen
+        // segment permissions.
+        let replacementPermissions = mode_t(statBuf.st_mode & 0o700)
         return CompactionReadState(
             suffixLength: suffixLength,
             replacementPermissions: replacementPermissions
         )
     }
 
-    /// Opens the boundary segment for compaction read,
-    /// classifying `ENOENT` and `ELOOP` as `.removalBoundaryStale`
-    /// so a vanish or symlink swap landing between per-entry
-    /// revalidation and compaction-read open fails closed
-    /// without entering temp creation or atomic replacement.
+    /// Opens the boundary segment for compaction read.
+    ///
+    /// Vanish or symlink replacement surfaces as `.removalBoundaryStale`.
     private func openSegmentForCompactionRead(
         rootFD: Int32, leaf: String, url: URL
     ) throws(FileLogStoreRemoveError) -> Int32 {
@@ -333,12 +322,7 @@ extension FileLogStore {
         )
     }
 
-    /// Creates the compaction temporary at `leaf` carrying the
-    /// boundary segment's permission bits (`0o777`). Active
-    /// umask can drop bits the boundary segment held, so
-    /// `fchmod` re-applies the explicit permissions. Failure
-    /// between `openat` and `fchmod` runs the close + unlink
-    /// discipline so no partially-permissioned temp survives.
+    /// Creates the compaction temporary with owner-class permissions only.
     private func createCompactionTemporary(
         rootFD: Int32, leaf: String, url: URL, permissions: mode_t
     ) throws(FileLogStoreRemoveError) -> Int32 {
@@ -363,19 +347,56 @@ extension FileLogStore {
         }
         if Darwin.fchmod(descriptor, permissions) != 0 {
             let savedErrno = errno
-            _ = Darwin.close(descriptor)
-            _ = leaf.withCString { Darwin.unlinkat(rootFD, $0, 0) }
+            // Unlink before close: while the descriptor is still open
+            // the path resolves to the temp object we just created, so
+            // the unlink targets exactly that object.
+            let unlinkResult = leaf.withCString { cName in
+                Darwin.unlinkat(rootFD, cName, 0)
+            }
+            let unlinkErrno = unlinkResult != 0 ? errno : 0
+            let closeResult = Darwin.close(descriptor)
+            let closeErrno = closeResult != 0 ? errno : 0
+            var description = "compaction temporary permission-bit preservation failed"
+            if unlinkResult != 0 {
+                description += "; cleanup unlink failed errno \(unlinkErrno)"
+            }
+            if closeResult != 0 {
+                description += "; cleanup close failed errno \(closeErrno)"
+            }
             throw .operationFailed(
                 operation: .createCompactionTemporary,
                 url: url,
                 context: FileSystemErrorContext(
                     domain: NSPOSIXErrorDomain,
                     code: Int(savedErrno),
-                    description: "compaction temporary permission-bit preservation failed"
+                    description: description
                 )
             )
         }
         return descriptor
+    }
+
+    /// Guards the `off_t` cast and end-offset arithmetic so an
+    /// out-of-range boundary fails closed as `.readPreservedSuffix`
+    /// instead of trapping in `off_t(startOffset)`.
+    private func validateSuffixRange(
+        startOffset: UInt64,
+        length: UInt64,
+        url: URL
+    ) throws(FileLogStoreRemoveError) {
+        let offTMax = UInt64(off_t.max)
+        let (endOffset, overflow) = startOffset.addingReportingOverflow(length)
+        guard startOffset <= offTMax, !overflow, endOffset <= offTMax else {
+            throw .operationFailed(
+                operation: .readPreservedSuffix,
+                url: url,
+                context: FileSystemErrorContext(
+                    domain: FileSystemErrorContext.packageDomain,
+                    code: nil,
+                    description: "post-boundary suffix range exceeds off_t"
+                )
+            )
+        }
     }
 
     private func copySuffixToTemporary(
@@ -384,6 +405,18 @@ extension FileLogStore {
         startOffset: UInt64,
         length: UInt64,
         url: URL
+    ) throws(FileLogStoreRemoveError) {
+        try validateSuffixRange(
+            startOffset: startOffset, length: length, url: url
+        )
+        try seekToSuffixStart(readFD: readFD, startOffset: startOffset, url: url)
+        try streamSuffixBytes(
+            readFD: readFD, tempFD: tempFD, length: length, url: url
+        )
+    }
+
+    private func seekToSuffixStart(
+        readFD: Int32, startOffset: UInt64, url: URL
     ) throws(FileLogStoreRemoveError) {
         if Darwin.lseek(readFD, off_t(startOffset), SEEK_SET) < 0 {
             let savedErrno = errno
@@ -397,6 +430,11 @@ extension FileLogStore {
                 )
             )
         }
+    }
+
+    private func streamSuffixBytes(
+        readFD: Int32, tempFD: Int32, length: UInt64, url: URL
+    ) throws(FileLogStoreRemoveError) {
         var remaining = length
         let bufferSize = 65536
         let buffer = UnsafeMutableRawPointer.allocate(
@@ -457,7 +495,7 @@ extension FileLogStore {
                     context: FileSystemErrorContext(
                         domain: NSPOSIXErrorDomain,
                         code: Int(savedErrno),
-                        description: "write(compaction temp) failed"
+                        description: "compaction temporary write failed"
                     )
                 )
             }
@@ -468,7 +506,7 @@ extension FileLogStore {
                     context: FileSystemErrorContext(
                         domain: FileSystemErrorContext.packageDomain,
                         code: nil,
-                        description: "writeReturnedZero"
+                        description: "compaction temporary write returned zero"
                     )
                 )
             }
@@ -487,7 +525,7 @@ extension FileLogStore {
                 context: FileSystemErrorContext(
                     domain: NSPOSIXErrorDomain,
                     code: Int(savedErrno),
-                    description: "fsync(compaction temp) failed"
+                    description: "compaction temporary sync failed"
                 )
             )
         }
@@ -504,7 +542,7 @@ extension FileLogStore {
                 context: FileSystemErrorContext(
                     domain: NSPOSIXErrorDomain,
                     code: Int(savedErrno),
-                    description: "close(compaction temp) failed"
+                    description: "compaction temporary close failed"
                 )
             )
         }
@@ -529,7 +567,7 @@ extension FileLogStore {
                 context: FileSystemErrorContext(
                     domain: NSPOSIXErrorDomain,
                     code: Int(savedErrno),
-                    description: "renameat(compaction temp -> segment) failed"
+                    description: "compaction replacement failed"
                 )
             )
         }

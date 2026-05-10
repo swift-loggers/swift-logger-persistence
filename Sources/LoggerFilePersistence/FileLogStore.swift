@@ -6,16 +6,16 @@ import LoggerPersistence
 /// File-backed `PersistentLogStore`. Each `append(_:)` admits one
 /// canonical LF-terminated NDJSON envelope line into a segment file.
 ///
-/// Wire format is owned by `Docs/FileFormatSpec.md`. Segment topology
-/// (naming, rotation boundaries, retention) is a policy contract,
-/// not portable wire format. The actor serializes file-handle I/O.
-/// Producer-owned sequence metadata is preserved unchanged by the
-/// store.
+/// Wire format is owned by the file-format specification. Segment
+/// topology (naming, rotation boundaries, retention) is a policy
+/// contract, not portable wire format. The actor serializes
+/// file-handle I/O. Producer-owned sequence metadata is preserved
+/// unchanged by the store.
 public actor FileLogStore: PersistentLogStore {
-    /// Encoded NDJSON line byte cap per `Docs/FileFormatSpec.md`
-    /// ("Payload and Bounds"): an envelope line, including base64
-    /// payload, JSON punctuation, and trailing LF, must not exceed
-    /// 2 MiB.
+    /// Encoded NDJSON line byte cap per the file-format
+    /// specification ("Payload and Bounds"): an envelope line,
+    /// including base64 payload, JSON punctuation, and trailing
+    /// LF, must not exceed 2 MiB.
     public static let maxEncodedLineBytes = 2_097_152
 
     /// Module-internal so the export extension in a sibling file
@@ -63,27 +63,16 @@ public actor FileLogStore: PersistentLogStore {
     /// hold it under actor isolation.
     internal let operationBoundary = OperationBoundary()
 
-    /// TEST-ONLY hook fired before each `openSegmentForWriting`
-    /// call (initial open and rotation) once the held writer root
-    /// is in hand. Lets tests deterministically race a path-swap
-    /// against `openat(rootFD, ...)`. A throw surfaces as
-    /// `.operationFailed(.openWritableSegment)`.
+    /// TEST-ONLY: installs a seam before writable segment open.
+    /// Thrown errors project to `.openWritableSegment`.
     internal var onBeforeOpenWritableSegmentForTesting: (@Sendable () throws -> Void)?
 
-    /// TEST-ONLY hook fired between the post-create root
-    /// `lstat(2)` snapshot and the descriptor open. Lets tests
-    /// deterministically race a path-component swap against
-    /// `SegmentRoot.open` so the post-open identity check sees a
-    /// different inode and rejects.
+    /// TEST-ONLY: installs a seam before writer-root open.
+    /// Thrown errors project to `.openWritableSegment`.
     internal var onBeforeWriterRootOpenForTesting: (@Sendable () throws -> Void)?
 
-    /// TEST-ONLY hook fired by the export critical section after
-    /// all segment bytes have been written to the temp file but
-    /// before `fsync(temp)`. Lets tests inject a write-failure
-    /// equivalent so the cleanup contract can be exercised
-    /// without a filesystem-level fault. Module-internal so the
-    /// export extension in a sibling file can read it under
-    /// actor isolation.
+    /// TEST-ONLY: installs a seam before export temp fsync.
+    /// Thrown errors project to `.writeTemporaryDestinationBytes`.
     internal var onAfterWritingTemporaryBytesForTesting: (@Sendable () async throws -> Void)?
 
     /// TEST-ONLY: installs a seam before export commit.
@@ -108,9 +97,13 @@ public actor FileLogStore: PersistentLogStore {
     /// Thrown errors project to `.reopenActiveSegment`.
     internal var onBeforeReopenActiveSegmentForTesting: (@Sendable (URL) throws -> Void)?
 
-    /// TEST-ONLY: installs a seam before the compaction read open.
+    /// TEST-ONLY: installs a seam before compaction opens a segment for reading.
     /// Thrown errors project to `.openSegment`.
     internal var onBeforeOpenCompactionReadForTesting: (@Sendable (URL) throws -> Void)?
+
+    /// TEST-ONLY: installs a seam before compaction's pre-replace boundary revalidation.
+    /// Thrown errors project to `.validateBoundary`.
+    internal var onBeforePreReplaceRevalidateForTesting: (@Sendable (URL) throws -> Void)?
 
     /// TEST-ONLY: rotated-topology classification override.
     internal var rotatedTopologyOverrideForTesting: (@Sendable () -> InternalReadError?)?
@@ -118,6 +111,11 @@ public actor FileLogStore: PersistentLogStore {
     /// TEST-ONLY: installs a seam before each retention segment deletion.
     /// Thrown errors project to `.enforceRetention`.
     internal var onBeforeRetentionUnlinkForTesting: (@Sendable (URL) throws -> Void)?
+
+    /// TEST-ONLY: installs a seam between successful leaf `mkdir(2)`
+    /// and the umask-independent permission preservation step.
+    /// Thrown errors project to `.createDirectory`.
+    internal var onBeforeDirectoryChmodForTesting: (@Sendable (URL) throws -> Void)?
 
     /// Creates a file-backed store.
     ///
@@ -420,7 +418,7 @@ public actor FileLogStore: PersistentLogStore {
                 context: FileSystemErrorContext(
                     domain: FileSystemErrorContext.packageDomain,
                     code: nil,
-                    description: "interiorCorruption"
+                    description: "interior corruption"
                 )
             )
         }
@@ -470,7 +468,7 @@ extension FileLogStore {
                 context: FileSystemErrorContext(
                     domain: FileSystemErrorContext.packageDomain,
                     code: nil,
-                    description: "configuredDirectoryAbsentAfterCreate"
+                    description: "configured directory absent after create"
                 )
             )
         }
@@ -513,13 +511,39 @@ extension FileLogStore {
     }
 
     /// Creates the configured directory and returns its `lstat(2)` identity.
+    ///
+    /// Newly-created directories are owner-only (`0o700`),
+    /// umask-independent, so an admitted log stream is private by
+    /// default even under a restrictive process umask. A
+    /// pre-existing directory is left as-is — this call never
+    /// tightens permissions on a directory it did not create. The
+    /// newly-created decision comes from the atomic `mkdir(2)`
+    /// EEXIST signal, so a foreign actor racing the leaf into
+    /// place cannot trigger a permission tighten.
     private func createDirectoryIfNeeded(
         fileManager: FileManager
     ) throws(FileLogStoreError) -> DirectoryIdentity {
+        let directoryPath = configuration.directory.path
+        try createDirectoryParentsIfNeeded(fileManager: fileManager)
+        let leafNewlyCreated = try createLeafDirectoryAtomically(path: directoryPath)
+        if leafNewlyCreated {
+            try fireBeforeDirectoryPermissionPreservationSeam(
+                url: configuration.directory
+            )
+            try applyOwnerOnlyPermissions(path: directoryPath)
+        }
+        return try captureDirectoryIdentity(path: directoryPath)
+    }
+
+    private func createDirectoryParentsIfNeeded(
+        fileManager: FileManager
+    ) throws(FileLogStoreError) {
+        let parentURL = configuration.directory.deletingLastPathComponent()
         do {
             try fileManager.createDirectory(
-                at: configuration.directory,
-                withIntermediateDirectories: true
+                at: parentURL,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
             )
         } catch {
             throw .operationFailed(
@@ -528,9 +552,78 @@ extension FileLogStore {
                 context: FileSystemErrorContext(from: error)
             )
         }
-        // Capture root identity without following symlinks.
+    }
+
+    /// Returns `true` when this call created the leaf, `false` when
+    /// the leaf already existed. The newly-created signal comes
+    /// from the atomic `mkdir(2)` EEXIST return so it cannot drift
+    /// against a concurrent foreign creator.
+    private func createLeafDirectoryAtomically(
+        path: String
+    ) throws(FileLogStoreError) -> Bool {
+        let mkdirResult = path.withCString { cPath in
+            Darwin.mkdir(cPath, 0o700)
+        }
+        if mkdirResult == 0 {
+            return true
+        }
+        let mkdirErrno = errno
+        if mkdirErrno == EEXIST {
+            return false
+        }
+        throw .operationFailed(
+            operation: .createDirectory,
+            url: configuration.directory,
+            context: FileSystemErrorContext(
+                domain: NSPOSIXErrorDomain,
+                code: Int(mkdirErrno),
+                description: "directory create failed"
+            )
+        )
+    }
+
+    private func fireBeforeDirectoryPermissionPreservationSeam(
+        url: URL
+    ) throws(FileLogStoreError) {
+        guard let hook = onBeforeDirectoryChmodForTesting else { return }
+        do {
+            try hook(url)
+        } catch {
+            throw .operationFailed(
+                operation: .createDirectory,
+                url: url,
+                context: FileSystemErrorContext(from: error)
+            )
+        }
+    }
+
+    /// Re-applies `0o700` on a newly-created leaf so the
+    /// writer-private contract holds regardless of process umask.
+    private func applyOwnerOnlyPermissions(
+        path: String
+    ) throws(FileLogStoreError) {
+        let chmodResult = path.withCString { cPath in
+            Darwin.fchmodat(AT_FDCWD, cPath, 0o700, AT_SYMLINK_NOFOLLOW)
+        }
+        if chmodResult != 0 {
+            let savedErrno = errno
+            throw .operationFailed(
+                operation: .createDirectory,
+                url: configuration.directory,
+                context: FileSystemErrorContext(
+                    domain: NSPOSIXErrorDomain,
+                    code: Int(savedErrno),
+                    description: "directory permission-bit preservation failed"
+                )
+            )
+        }
+    }
+
+    private func captureDirectoryIdentity(
+        path: String
+    ) throws(FileLogStoreError) -> DirectoryIdentity {
         var statBuf = stat()
-        let result = configuration.directory.path.withCString { cPath in
+        let result = path.withCString { cPath in
             lstat(cPath, &statBuf)
         }
         if result != 0 {
@@ -541,7 +634,7 @@ extension FileLogStore {
                 context: FileSystemErrorContext(
                     domain: NSPOSIXErrorDomain,
                     code: Int(savedErrno),
-                    description: "lstatFailed"
+                    description: "directory metadata read failed"
                 )
             )
         }
@@ -753,11 +846,7 @@ extension FileLogStore {
         }
         let oldHandle = active.handle
         activeSegment = nil
-        do {
-            try oldHandle.close()
-        } catch {
-            pendingCloseHandles.append(oldHandle)
-        }
+        closeOrDeferHandle(oldHandle)
         guard let root = writerRoot else {
             throw .operationFailed(
                 operation: .reopenActiveSegment,
@@ -785,7 +874,7 @@ extension FileLogStore {
         } catch {
             // Preserve undefined-state close handling through the
             // deferred-close queue.
-            do { try newHandle.close() } catch { pendingCloseHandles.append(newHandle) }
+            closeOrDeferHandle(newHandle)
             throw .operationFailed(
                 operation: .reopenActiveSegment,
                 url: url,
@@ -798,6 +887,17 @@ extension FileLogStore {
             sequence: sequence,
             size: position
         )
+    }
+
+    /// Closes the handle synchronously, or enqueues it on the
+    /// pending-close queue if synchronous close fails so a later
+    /// drain can retry rather than leaking the descriptor.
+    private func closeOrDeferHandle(_ handle: FileHandle) {
+        do {
+            try handle.close()
+        } catch {
+            pendingCloseHandles.append(handle)
+        }
     }
 }
 
@@ -813,10 +913,9 @@ extension FileLogStore {
 extension FileLogStore {
     // swiftlint:disable identifier_name
 
-    /// TEST-ONLY: closes the active handle and clears
-    /// `activeSegment`. Failed close is retained for deferred
-    /// close. Invariant: active handle must not already be
-    /// pending close.
+    /// TEST-ONLY: closes the active handle and clears `activeSegment`.
+    /// Failed close is retained for retry.
+    /// Invariant: active handle must not already be pending close.
     internal func _forceCloseActiveHandleForTesting() throws {
         guard let active = activeSegment else {
             throw TestSeamFailure.noActiveSegment
@@ -850,9 +949,8 @@ extension FileLogStore {
         )
     }
 
-    /// TEST-ONLY: injects a handle into the pending-close retry
-    /// queue. The handle must not already be present in the
-    /// queue.
+    /// TEST-ONLY: injects a handle into the pending-close retry queue.
+    /// Invariant: handle must not already be pending close.
     internal func _injectPendingCloseHandleForTesting(_ handle: FileHandle) throws {
         try _ensureHandleNotPendingCloseForTesting(handle)
         pendingCloseHandles.append(handle)

@@ -49,6 +49,14 @@ let package = Package(
             name: "LoggerPersistenceTestSupport",
             path: "Tests/LoggerPersistenceTestSupport"
         ),
+        .executableTarget(
+            name: "UmaskRegressionChild",
+            dependencies: [
+                "LoggerFilePersistence",
+                "LoggerPersistence"
+            ],
+            path: "Tests/UmaskRegressionChild"
+        ),
         .testTarget(
             name: "LoggerPersistenceTests",
             dependencies: [

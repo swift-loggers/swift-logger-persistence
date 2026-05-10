@@ -66,10 +66,8 @@ extension AcceptedLineIteratorMidChainPartialTests {
         let first = try await iterator.next()
         #expect(first == acceptedLine)
 
-        // If the iterator wrongly advanced to segment 2, opening
-        // the now-removed file would fail with `.openSegment` on
-        // `log.000002.ndjson` instead of the expected
-        // `.readSegmentBytes` on `log.000001.ndjson`.
+        // Removing segment 2 makes a wrongly-advanced iterator surface
+        // as `.openSegment` on segment 2, not `.readSegmentBytes` on segment 1.
         try FileManager.default.removeItem(at: segment2URL)
 
         // Second pull observes segment 1's trailing partial. Because

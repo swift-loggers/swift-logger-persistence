@@ -5,12 +5,7 @@ import Testing
 
 @testable import LoggerFilePersistence
 
-/// Compaction-time stale-boundary coverage for
-/// `FileLogStore.removeExportedLogs()`. Exercises the narrow
-/// window between per-entry revalidation and compaction-read
-/// open where a vanish, symlink swap, identity swap, or
-/// truncate-below-boundary must fail closed with
-/// `.removalBoundaryStale` and leave no compaction temp behind.
+/// Compaction-time stale-boundary coverage for destructive removal.
 @Suite("FileLogStore destructive removal — compaction-time stale boundary")
 struct FileLogStoreCompactionStaleBoundaryTests {
     private static func uniqueDirectory() -> URL {
@@ -55,9 +50,7 @@ struct FileLogStoreCompactionStaleBoundaryTests {
         defer { FileLogStoreTestSupport.remove(exportParent) }
         try await store.exportLogs(to: exportURL)
 
-        // Append post-boundary bytes to seg1 while preserving file
-        // identity, so the per-entry-revalidation step succeeds and
-        // the destructive path enters `compactSegment`.
+        // Append post-boundary bytes so compaction runs after per-entry revalidation.
         let seg1URL = FileLogStoreTestSupport.rotatedSegmentURL(
             in: directory, sequence: 1
         )
@@ -72,7 +65,7 @@ struct FileLogStoreCompactionStaleBoundaryTests {
 
 extension FileLogStoreCompactionStaleBoundaryTests {
     @Test(
-        "Identity swap between per-entry and compaction-read fails compaction-time revalidation",
+        "Compaction-read identity swap fails stale",
         .tags(.lgp9)
     )
     func compactionTimeRevalidationCatchesIdentitySwap() async throws {
@@ -83,10 +76,7 @@ extension FileLogStoreCompactionStaleBoundaryTests {
             directory: directory
         )
 
-        // Test seam fires inside the actor-isolated removal critical
-        // section, AFTER per-entry revalidation has succeeded and
-        // BEFORE the compaction read descriptor is opened. Swap seg1
-        // for a fresh file at the same path so file identity changes.
+        // Swap seg1 after per-entry revalidation and before compaction read open.
         let replacementBytes = Data(repeating: 0x42, count: 4096)
         let seg1Path = seg1URL.path
         let captured = replacementBytes
@@ -109,9 +99,7 @@ extension FileLogStoreCompactionStaleBoundaryTests {
             }
         }
 
-        // The replacement bytes survived; compaction-time
-        // revalidation rejected before any temp create or atomic
-        // replacement could overwrite the swapped file.
+        // Replacement bytes preserved; no atomic replacement ran.
         let onDisk = try Data(contentsOf: seg1URL)
         #expect(onDisk == replacementBytes)
 
@@ -123,7 +111,7 @@ extension FileLogStoreCompactionStaleBoundaryTests {
     }
 
     @Test(
-        "Truncate below exportedPrefixEnd between per-entry and compaction-read fails compaction-time revalidation",
+        "Compaction-read truncation fails stale",
         .tags(.lgp9)
     )
     func compactionTimeRevalidationCatchesShorterThanBoundary() async throws {
@@ -134,10 +122,7 @@ extension FileLogStoreCompactionStaleBoundaryTests {
             directory: directory
         )
 
-        // Test seam truncates seg1 below `exportedPrefixEnd` while
-        // preserving file identity. `O_WRONLY | O_NOFOLLOW` keeps
-        // the same inode; `ftruncate(_, 0)` shrinks below any
-        // captured `exportedPrefixEnd > 0`.
+        // Truncate seg1 below `exportedPrefixEnd` while preserving identity.
         let seg1Path = seg1URL.path
         await store._setOnBeforeOpenCompactionReadForTesting { _ in
             let descriptor = seg1Path.withCString { cPath in
@@ -166,6 +151,10 @@ extension FileLogStoreCompactionStaleBoundaryTests {
             }
         }
 
+        // Planted truncated state preserved; no atomic replacement ran.
+        let onDisk = try Data(contentsOf: seg1URL)
+        #expect(onDisk.isEmpty)
+
         // No compaction temp left behind.
         let entries = try FileManager.default.contentsOfDirectory(
             atPath: directory.path
@@ -174,7 +163,7 @@ extension FileLogStoreCompactionStaleBoundaryTests {
     }
 
     @Test(
-        "Vanish between per-entry and compaction-read fails compaction-read open as .removalBoundaryStale",
+        "Compaction-read vanish fails stale",
         .tags(.lgp9)
     )
     func compactionReadOpenVanishStaleBoundary() async throws {
@@ -185,11 +174,7 @@ extension FileLogStoreCompactionStaleBoundaryTests {
             directory: directory
         )
 
-        // Seam unlinks seg1 from inside the actor-isolated removal
-        // critical section, after per-entry revalidation succeeds
-        // but before `openat(...)` runs for the compaction read.
-        // The compaction-read open hits ENOENT and must classify
-        // as `.removalBoundaryStale`, not `.operationFailed(.openSegment)`.
+        // Unlink seg1 after per-entry revalidation and before compaction read open.
         let seg1Path = seg1URL.path
         await store._setOnBeforeOpenCompactionReadForTesting { _ in
             try FileManager.default.removeItem(atPath: seg1Path)
@@ -207,8 +192,7 @@ extension FileLogStoreCompactionStaleBoundaryTests {
             }
         }
 
-        // No compaction temp left behind: the open failed before any
-        // temp creation or atomic replacement could run.
+        // No compaction temp left behind.
         let entries = try FileManager.default.contentsOfDirectory(
             atPath: directory.path
         )
@@ -216,7 +200,7 @@ extension FileLogStoreCompactionStaleBoundaryTests {
     }
 
     @Test(
-        "Symlink swap between per-entry and compaction-read fails compaction-read open as .removalBoundaryStale",
+        "Compaction-read symlink swap fails stale",
         .tags(.lgp9)
     )
     func compactionReadOpenSymlinkStaleBoundary() async throws {
@@ -231,11 +215,7 @@ extension FileLogStoreCompactionStaleBoundaryTests {
         let targetBytes = Data(repeating: 0xCC, count: 256)
         try targetBytes.write(to: symlinkTarget)
 
-        // Seam unlinks seg1 and plants a symlink at the same path
-        // pointing at an unrelated sibling, between per-entry
-        // revalidation and compaction-read open. `O_NOFOLLOW`
-        // surfaces ELOOP, which must classify as
-        // `.removalBoundaryStale`, not `.operationFailed(.openSegment)`.
+        // Swap seg1 to a symlink before compaction read open.
         let seg1Path = seg1URL.path
         let targetPath = symlinkTarget.path
         await store._setOnBeforeOpenCompactionReadForTesting { _ in
@@ -259,8 +239,108 @@ extension FileLogStoreCompactionStaleBoundaryTests {
             }
         }
 
-        // The symlink at the boundary path was not dereferenced; the
-        // unrelated sibling was not modified — no atomic replace ran.
+        // Symlink not dereferenced; symlink target bytes untouched.
+        let resolvedDestination = try FileManager.default.destinationOfSymbolicLink(
+            atPath: seg1URL.path
+        )
+        #expect(resolvedDestination == symlinkTarget.path)
+        let onTarget = try Data(contentsOf: symlinkTarget)
+        #expect(onTarget == targetBytes)
+
+        // No compaction temp left behind.
+        let entries = try FileManager.default.contentsOfDirectory(
+            atPath: directory.path
+        )
+        #expect(!entries.contains(where: { $0.hasPrefix(".swift-logger-compact-") }))
+    }
+
+    @Test(
+        "Pre-replace identity swap fails stale",
+        .tags(.lgp9)
+    )
+    func preReplaceRevalidationCatchesIdentitySwap() async throws {
+        let directory = Self.uniqueDirectory()
+        try Self.makeDirectory(directory)
+        defer { FileLogStoreTestSupport.remove(directory) }
+        let (store, seg1URL) = try await Self.setupRotatedCompactionFixture(
+            directory: directory
+        )
+
+        // Swap seg1 after compaction-read revalidation and before pre-replace revalidation.
+        let replacementBytes = Data(repeating: 0x42, count: 4096)
+        let seg1Path = seg1URL.path
+        let captured = replacementBytes
+        await store._setOnBeforePreReplaceRevalidateForTesting { _ in
+            try FileManager.default.removeItem(atPath: seg1Path)
+            try captured.write(to: URL(fileURLWithPath: seg1Path))
+        }
+
+        do {
+            try await store.removeExportedLogs()
+            Issue.record(
+                "expected .removalBoundaryStale on pre-replace identity swap"
+            )
+        } catch {
+            switch error {
+            case let .removalBoundaryStale(url, _):
+                #expect(url == seg1URL)
+            default:
+                Issue.record("expected .removalBoundaryStale, got \(error)")
+            }
+        }
+
+        // Replacement bytes preserved; no atomic replacement ran.
+        let onDisk = try Data(contentsOf: seg1URL)
+        #expect(onDisk == replacementBytes)
+
+        // No compaction temp left behind.
+        let entries = try FileManager.default.contentsOfDirectory(
+            atPath: directory.path
+        )
+        #expect(!entries.contains(where: { $0.hasPrefix(".swift-logger-compact-") }))
+    }
+
+    @Test(
+        "Pre-replace symlink swap fails stale",
+        .tags(.lgp9)
+    )
+    func preReplaceRevalidationCatchesSymlinkSwap() async throws {
+        let directory = Self.uniqueDirectory()
+        try Self.makeDirectory(directory)
+        defer { FileLogStoreTestSupport.remove(directory) }
+        let (store, seg1URL) = try await Self.setupRotatedCompactionFixture(
+            directory: directory
+        )
+
+        let symlinkTarget = directory.appendingPathComponent("untouched-target.bin")
+        let targetBytes = Data(repeating: 0xCC, count: 256)
+        try targetBytes.write(to: symlinkTarget)
+
+        // Swap seg1 to a symlink before pre-replace revalidation.
+        let seg1Path = seg1URL.path
+        let targetPath = symlinkTarget.path
+        await store._setOnBeforePreReplaceRevalidateForTesting { _ in
+            try FileManager.default.removeItem(atPath: seg1Path)
+            try FileManager.default.createSymbolicLink(
+                atPath: seg1Path, withDestinationPath: targetPath
+            )
+        }
+
+        do {
+            try await store.removeExportedLogs()
+            Issue.record(
+                "expected .removalBoundaryStale on pre-replace symlink swap"
+            )
+        } catch {
+            switch error {
+            case let .removalBoundaryStale(url, _):
+                #expect(url == seg1URL)
+            default:
+                Issue.record("expected .removalBoundaryStale, got \(error)")
+            }
+        }
+
+        // Symlink not dereferenced; symlink target bytes untouched.
         let resolvedDestination = try FileManager.default.destinationOfSymbolicLink(
             atPath: seg1URL.path
         )

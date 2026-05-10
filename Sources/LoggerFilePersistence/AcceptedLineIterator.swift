@@ -166,7 +166,7 @@ internal struct AcceptedLineSequence: AsyncSequence {
                         context: FileSystemErrorContext(
                             domain: FileSystemErrorContext.packageDomain,
                             code: nil,
-                            description: "trailingPartialInNonFinalSegment"
+                            description: "trailing partial in non-final segment"
                         )
                     )
                 }

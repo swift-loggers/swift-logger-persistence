@@ -6,13 +6,16 @@ import Loggers
 ///
 /// The encoder owns three responsibilities:
 ///
-/// 1. **Redaction.** The encoded payload contains only safe-text
-///    projections of the message and attributes -- private segments
-///    become `<private>` and sensitive ones become `<redacted>`. Raw
-///    values for `.private` / `.sensitive` attributes never reach the
+/// 1. **Redaction.** Privacy redaction applies to message privacy
+///    segments and attribute values: private message segments become
+///    `<private>` and sensitive ones become `<redacted>`; raw values
+///    for `.private` / `.sensitive` attributes never reach the
 ///    payload. `.public` attributes are preserved with their typed
 ///    `LogValue` shape so consumers can re-encode them for downstream
-///    backends without reparsing strings.
+///    backends without reparsing strings. Record `domain`, attribute
+///    keys, and object keys are schema/key material and are persisted
+///    verbatim; callers must keep those names non-sensitive and
+///    PII-free.
 /// 2. **Monotonic sequence.** ``PersistentLogEnvelope/sequence`` is
 ///    per-instance monotonic, assigned before any `async` boundary;
 ///    `0` is reserved and overflow fails closed with

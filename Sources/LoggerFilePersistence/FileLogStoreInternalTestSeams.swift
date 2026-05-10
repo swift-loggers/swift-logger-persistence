@@ -92,6 +92,14 @@ extension FileLogStore {
         onBeforeOpenCompactionReadForTesting = hook
     }
 
+    /// TEST-ONLY: installs a seam before compaction's pre-replace boundary revalidation.
+    /// Thrown errors project to `.validateBoundary`.
+    internal func _setOnBeforePreReplaceRevalidateForTesting(
+        _ hook: (@Sendable (URL) throws -> Void)?
+    ) {
+        onBeforePreReplaceRevalidateForTesting = hook
+    }
+
     /// TEST-ONLY: installs a rotated-topology classification override.
     internal func _setRotatedTopologyOverrideForTesting(
         _ hook: (@Sendable () -> InternalReadError?)?
@@ -105,6 +113,15 @@ extension FileLogStore {
         _ hook: (@Sendable (URL) throws -> Void)?
     ) {
         onBeforeRetentionUnlinkForTesting = hook
+    }
+
+    /// TEST-ONLY: installs a seam between successful leaf `mkdir(2)`
+    /// and the umask-independent permission preservation step.
+    /// Thrown errors project to `.createDirectory`.
+    internal func _setOnBeforeDirectoryChmodForTesting(
+        _ hook: (@Sendable (URL) throws -> Void)?
+    ) {
+        onBeforeDirectoryChmodForTesting = hook
     }
 
     // swiftlint:enable identifier_name

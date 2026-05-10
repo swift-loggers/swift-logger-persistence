@@ -170,7 +170,7 @@ extension FileLogStoreError {
                 context: FileSystemErrorContext(
                     domain: FileSystemErrorContext.packageDomain,
                     code: nil,
-                    description: "interiorCorruption"
+                    description: "interior corruption"
                 )
             )
         }

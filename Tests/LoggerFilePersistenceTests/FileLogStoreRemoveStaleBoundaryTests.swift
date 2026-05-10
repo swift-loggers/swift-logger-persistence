@@ -6,10 +6,6 @@ import Testing
 @testable import LoggerFilePersistence
 
 /// Stale-boundary coverage for `FileLogStore.removeExportedLogs()`.
-/// Each test forces a topology mismatch via out-of-band
-/// filesystem mutation between export commit and removal, then
-/// asserts removal fails closed with `.removalBoundaryStale`
-/// and performs no further mutation.
 @Suite("FileLogStore destructive removal — stale boundary")
 struct FileLogStoreRemoveStaleBoundaryTests {
     private static func uniqueDirectory() -> URL {
@@ -49,6 +45,118 @@ struct FileLogStoreRemoveStaleBoundaryTests {
         try await store.exportLogs(to: exportURL)
         return (store, directory.appendingPathComponent("log.ndjson"))
     }
+
+    private static func castRemoveError(
+        _ error: any Error
+    ) -> FileLogStoreRemoveError? {
+        guard let removeError = error as? FileLogStoreRemoveError else {
+            Issue.record(
+                "expected FileLogStoreRemoveError, got \(type(of: error)): \(error)"
+            )
+            return nil
+        }
+        return removeError
+    }
+
+    private static func expectRemovalBoundaryStale(
+        _ error: any Error,
+        url expectedURL: URL? = nil
+    ) {
+        guard let removeError = Self.castRemoveError(error) else { return }
+        switch removeError {
+        case let .removalBoundaryStale(url, _):
+            if let expectedURL {
+                #expect(url == expectedURL)
+            }
+        default:
+            Issue.record("expected .removalBoundaryStale, got \(removeError)")
+        }
+    }
+
+    private static func expectFileSystemContext(
+        _ context: FileSystemErrorContext,
+        matches expected: FileSystemErrorContext
+    ) {
+        #expect(context.domain == expected.domain)
+        #expect(context.code == expected.code)
+        #expect(context.description == expected.description)
+    }
+
+    private static func expectValidateBoundaryOperationFailed(
+        _ error: any Error,
+        expectedURL: URL,
+        expectedContext: FileSystemErrorContext
+    ) {
+        guard let removeError = Self.castRemoveError(error) else { return }
+        switch removeError {
+        case let .operationFailed(operation, url, context):
+            #expect(operation == .validateBoundary)
+            #expect(url == expectedURL)
+            Self.expectFileSystemContext(context, matches: expectedContext)
+        default:
+            Issue.record(
+                "expected operationFailed(.validateBoundary), got \(removeError)"
+            )
+        }
+    }
+
+    private static func withInstalledSeam(
+        install: () async -> Void,
+        cleanup: () async -> Void,
+        body: () async throws -> Void
+    ) async throws {
+        await install()
+        var capturedError: (any Error)?
+        do {
+            try await body()
+        } catch {
+            capturedError = error
+        }
+        await cleanup()
+        if let capturedError { throw capturedError }
+    }
+
+    private static func withInstalledSeam<Handler>(
+        setter: @Sendable @escaping (Handler?) async -> Void,
+        handler: Handler,
+        body: () async throws -> Void
+    ) async throws {
+        try await withInstalledSeam(
+            install: { await setter(handler) },
+            cleanup: { await setter(nil) },
+            body: body
+        )
+    }
+
+    private static func withProcessRemovalEntrySeam(
+        on store: FileLogStore,
+        handler: @Sendable @escaping (URL) async throws -> Void,
+        body: () async throws -> Void
+    ) async throws {
+        try await withInstalledSeam(
+            setter: { await store._setOnBeforeProcessRemovalEntryForTesting($0) },
+            handler: handler,
+            body: body
+        )
+    }
+
+    private static func withRotatedTopologyOverride(
+        on store: FileLogStore,
+        handler: @Sendable @escaping () -> InternalReadError?,
+        body: () async throws -> Void
+    ) async throws {
+        try await withInstalledSeam(
+            setter: { await store._setRotatedTopologyOverrideForTesting($0) },
+            handler: handler,
+            body: body
+        )
+    }
+
+    private static func closeDescriptorAndRecordUnexpectedError(_ descriptor: Int32) {
+        if Darwin.close(descriptor) != 0 {
+            Issue.record("close(descriptor) failed with errno \(errno)")
+        }
+    }
 }
 
 // MARK: - Missing segment
@@ -66,20 +174,13 @@ extension FileLogStoreRemoveStaleBoundaryTests {
             directory: directory
         )
 
-        // Out-of-band: unlink the boundary segment between
-        // export commit and removal.
         try FileManager.default.removeItem(at: segmentURL)
 
         do {
             try await store.removeExportedLogs()
             Issue.record("expected .removalBoundaryStale")
         } catch {
-            switch error {
-            case let .removalBoundaryStale(url, _):
-                #expect(url == segmentURL)
-            default:
-                Issue.record("expected .removalBoundaryStale, got \(error)")
-            }
+            Self.expectRemovalBoundaryStale(error, url: segmentURL)
         }
     }
 }
@@ -99,8 +200,6 @@ extension FileLogStoreRemoveStaleBoundaryTests {
             directory: directory
         )
 
-        // Out-of-band: unlink the original file and create a
-        // fresh file at the same path.
         try FileManager.default.removeItem(at: segmentURL)
         try Data(repeating: 0x42, count: 4096).write(to: segmentURL)
 
@@ -108,16 +207,9 @@ extension FileLogStoreRemoveStaleBoundaryTests {
             try await store.removeExportedLogs()
             Issue.record("expected .removalBoundaryStale")
         } catch {
-            switch error {
-            case let .removalBoundaryStale(url, _):
-                #expect(url == segmentURL)
-            default:
-                Issue.record("expected .removalBoundaryStale, got \(error)")
-            }
+            Self.expectRemovalBoundaryStale(error, url: segmentURL)
         }
 
-        // The replacement bytes survived: validation fails before
-        // any mutation happens.
         let onDisk = try Data(contentsOf: segmentURL)
         #expect(onDisk.count == 4096)
     }
@@ -138,31 +230,25 @@ extension FileLogStoreRemoveStaleBoundaryTests {
             directory: directory
         )
 
-        // Pre-stage replacement bytes; the test seam below
-        // performs the swap from inside the actor-isolated
-        // critical section so it lands AFTER global validation.
         let replacementBytes = Data(repeating: 0x42, count: 4096)
         let segmentPath = segmentURL.path
         let captured = replacementBytes
-        await store._setOnBeforeProcessRemovalEntryForTesting { _ in
-            try FileManager.default.removeItem(atPath: segmentPath)
-            try captured.write(to: URL(fileURLWithPath: segmentPath))
-        }
-
-        do {
-            try await store.removeExportedLogs()
-            Issue.record("expected .removalBoundaryStale on identity mismatch")
-        } catch {
-            switch error {
-            case let .removalBoundaryStale(url, _):
-                #expect(url == segmentURL)
-            default:
-                Issue.record("expected .removalBoundaryStale, got \(error)")
+        try await Self.withProcessRemovalEntrySeam(
+            on: store,
+            handler: { _ in
+                try FileManager.default.removeItem(atPath: segmentPath)
+                try captured.write(to: URL(fileURLWithPath: segmentPath))
+            },
+            body: {
+                do {
+                    try await store.removeExportedLogs()
+                    Issue.record("expected .removalBoundaryStale on identity mismatch")
+                } catch {
+                    Self.expectRemovalBoundaryStale(error, url: segmentURL)
+                }
             }
-        }
+        )
 
-        // Replacement file is preserved: per-entry mutation
-        // failed closed before any unlink/compact ran.
         let onDisk = try Data(contentsOf: segmentURL)
         #expect(onDisk == replacementBytes)
     }
@@ -183,10 +269,6 @@ extension FileLogStoreRemoveStaleBoundaryTests {
             directory: directory
         )
 
-        // Out-of-band: unlink the boundary segment and create a
-        // symlink at the same path pointing at an unrelated
-        // sibling. Removal must fail closed before mutating the
-        // boundary path or the symlink target.
         let symlinkTarget = directory.appendingPathComponent("untouched-target.bin")
         let targetBytes = Data(repeating: 0xAA, count: 256)
         try targetBytes.write(to: symlinkTarget)
@@ -200,17 +282,13 @@ extension FileLogStoreRemoveStaleBoundaryTests {
             try await store.removeExportedLogs()
             Issue.record("expected .removalBoundaryStale on symlink replacement")
         } catch {
-            switch error {
-            case let .removalBoundaryStale(url, _):
-                #expect(url == segmentURL)
-            default:
-                Issue.record("expected .removalBoundaryStale, got \(error)")
-            }
+            Self.expectRemovalBoundaryStale(error, url: segmentURL)
         }
 
-        // The boundary path is still the planted symlink (not
-        // unlinked or replaced) and the symlink target was not
-        // modified: validation fails before any mutation.
+        #expect(
+            try FileManager.default.attributesOfItem(atPath: segmentURL.path)[.type]
+                as? FileAttributeType == .typeSymbolicLink
+        )
         let resolvedDestination = try FileManager.default.destinationOfSymbolicLink(
             atPath: segmentURL.path
         )
@@ -235,26 +313,23 @@ extension FileLogStoreRemoveStaleBoundaryTests {
             directory: directory
         )
 
-        // Test seam unlinks the boundary segment from inside
-        // the actor-isolated critical section so the swap
-        // lands after global validation but before per-entry
-        // boundary revalidation.
         let segmentPath = segmentURL.path
-        await store._setOnBeforeProcessRemovalEntryForTesting { _ in
-            try FileManager.default.removeItem(atPath: segmentPath)
-        }
-
-        do {
-            try await store.removeExportedLogs()
-            Issue.record("expected .removalBoundaryStale on per-entry vanish")
-        } catch {
-            switch error {
-            case let .removalBoundaryStale(url, _):
-                #expect(url == segmentURL)
-            default:
-                Issue.record("expected .removalBoundaryStale, got \(error)")
+        try await Self.withProcessRemovalEntrySeam(
+            on: store,
+            handler: { _ in
+                try FileManager.default.removeItem(atPath: segmentPath)
+            },
+            body: {
+                do {
+                    try await store.removeExportedLogs()
+                    Issue.record("expected .removalBoundaryStale on per-entry vanish")
+                } catch {
+                    Self.expectRemovalBoundaryStale(error, url: segmentURL)
+                }
             }
-        }
+        )
+
+        #expect(!FileManager.default.fileExists(atPath: segmentURL.path))
     }
 
     @Test(
@@ -275,29 +350,24 @@ extension FileLogStoreRemoveStaleBoundaryTests {
 
         let segmentPath = segmentURL.path
         let targetPath = symlinkTarget.path
-        await store._setOnBeforeProcessRemovalEntryForTesting { _ in
-            try FileManager.default.removeItem(atPath: segmentPath)
-            try FileManager.default.createSymbolicLink(
-                atPath: segmentPath, withDestinationPath: targetPath
-            )
-        }
-
-        do {
-            try await store.removeExportedLogs()
-            Issue.record("expected .removalBoundaryStale on per-entry symlink swap")
-        } catch {
-            switch error {
-            case let .removalBoundaryStale(url, _):
-                #expect(url == segmentURL)
-            default:
-                Issue.record("expected .removalBoundaryStale, got \(error)")
+        try await Self.withProcessRemovalEntrySeam(
+            on: store,
+            handler: { _ in
+                try FileManager.default.removeItem(atPath: segmentPath)
+                try FileManager.default.createSymbolicLink(
+                    atPath: segmentPath, withDestinationPath: targetPath
+                )
+            },
+            body: {
+                do {
+                    try await store.removeExportedLogs()
+                    Issue.record("expected .removalBoundaryStale on per-entry symlink swap")
+                } catch {
+                    Self.expectRemovalBoundaryStale(error, url: segmentURL)
+                }
             }
-        }
+        )
 
-        // The boundary path is still the planted symlink (not
-        // unlinked or replaced) and the symlink target was not
-        // modified — failure happens before any unlink/compact
-        // runs against the dereferenced path.
         let resolvedDestination = try FileManager.default.destinationOfSymbolicLink(
             atPath: segmentURL.path
         )
@@ -332,39 +402,34 @@ extension FileLogStoreRemoveStaleBoundaryTests {
         defer { FileLogStoreTestSupport.remove(exportParent) }
         try await store.exportLogs(to: exportURL)
 
-        // Inject a non-duplicate enumeration failure shape via
-        // the override seam: a generic POSIX I/O error with no
-        // duplicate-sequence marker. The dispatch must route
-        // this through `.operationFailed(.validateBoundary)`,
-        // not through `.removalBoundaryStale`.
         let injectedURL = directory.appendingPathComponent("log.000001.ndjson")
         let injectedContext = FileSystemErrorContext(
             domain: NSPOSIXErrorDomain,
             code: Int(EBADF),
             description: "synthetic enumeration failure"
         )
-        let injectedURLPath = injectedURL
-        await store._setRotatedTopologyOverrideForTesting {
-            .operationFailed(
-                operation: .enumerateSegments,
-                url: injectedURLPath,
-                context: injectedContext
-            )
-        }
-
-        do {
-            try await store.removeExportedLogs()
-            Issue.record("expected operationFailed(.validateBoundary)")
-        } catch {
-            switch error {
-            case let .operationFailed(operation, url, context):
-                #expect(operation == .validateBoundary)
-                #expect(url == injectedURL)
-                #expect(context == injectedContext)
-            default:
-                Issue.record("expected operationFailed(.validateBoundary), got \(error)")
+        try await Self.withRotatedTopologyOverride(
+            on: store,
+            handler: {
+                .operationFailed(
+                    operation: .enumerateSegments,
+                    url: injectedURL,
+                    context: injectedContext
+                )
+            },
+            body: {
+                do {
+                    try await store.removeExportedLogs()
+                    Issue.record("expected operationFailed(.validateBoundary)")
+                } catch {
+                    Self.expectValidateBoundaryOperationFailed(
+                        error,
+                        expectedURL: injectedURL,
+                        expectedContext: injectedContext
+                    )
+                }
             }
-        }
+        )
     }
 }
 
@@ -397,8 +462,6 @@ extension FileLogStoreRemoveStaleBoundaryTests {
         defer { FileLogStoreTestSupport.remove(exportParent) }
         try await store.exportLogs(to: exportURL)
 
-        // Plant a duplicate-sequence file (extra zero padding
-        // parses as the same numeric sequence as `log.000001`).
         let duplicateURL = directory.appendingPathComponent("log.0000001.ndjson")
         try Data("PLANTED\n".utf8).write(to: duplicateURL)
 
@@ -415,19 +478,15 @@ extension FileLogStoreRemoveStaleBoundaryTests {
             try await store.removeExportedLogs()
             Issue.record("expected .removalBoundaryStale on ambiguous topology")
         } catch {
-            switch error {
-            case .removalBoundaryStale:
-                break
-            default:
-                Issue.record("expected .removalBoundaryStale, got \(error)")
-            }
+            Self.expectRemovalBoundaryStale(error)
         }
 
-        // Neither boundary segment was mutated.
         let seg1After = try Data(contentsOf: seg1URL)
         let seg2After = try Data(contentsOf: seg2URL)
         #expect(seg1After == seg1Before)
         #expect(seg2After == seg2Before)
+        #expect(FileManager.default.fileExists(atPath: duplicateURL.path))
+        #expect(try Data(contentsOf: duplicateURL) == Data("PLANTED\n".utf8))
     }
 }
 
@@ -446,25 +505,22 @@ extension FileLogStoreRemoveStaleBoundaryTests {
             directory: directory
         )
 
-        // Out-of-band: shrink the boundary segment below
-        // exportedPrefixEnd while preserving file identity.
         let descriptor = segmentURL.path.withCString { cPath in
             Darwin.open(cPath, O_WRONLY | O_NOFOLLOW)
         }
         try #require(descriptor >= 0)
-        defer { Darwin.close(descriptor) }
+        defer { Self.closeDescriptorAndRecordUnexpectedError(descriptor) }
         #expect(Darwin.ftruncate(descriptor, 0) == 0)
+        #expect(
+            try FileManager.default.attributesOfItem(atPath: segmentURL.path)[.size]
+                as? NSNumber == 0
+        )
 
         do {
             try await store.removeExportedLogs()
             Issue.record("expected .removalBoundaryStale")
         } catch {
-            switch error {
-            case let .removalBoundaryStale(url, _):
-                #expect(url == segmentURL)
-            default:
-                Issue.record("expected .removalBoundaryStale, got \(error)")
-            }
+            Self.expectRemovalBoundaryStale(error, url: segmentURL)
         }
     }
 }

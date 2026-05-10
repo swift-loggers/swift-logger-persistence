@@ -3,8 +3,8 @@ import Foundation
 /// Public removal error surface for `FileLogStore.removeExportedLogs()`.
 ///
 /// The full removal contract — boundary semantics, atomicity,
-/// and retry behavior — is owned by `Docs/APIDesign.md`
-/// ("Destructive removal").
+/// and retry behavior — is owned by the API design ("Destructive
+/// removal").
 public enum FileLogStoreRemoveError: Error, Sendable, Equatable {
     /// Operation-local classification for non-compatibility-classified
     /// filesystem failures during removal.

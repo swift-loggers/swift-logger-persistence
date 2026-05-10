@@ -3,7 +3,8 @@
 This document is design input for M3.3. Public API is locked by accepted
 API/spec review, then verified by implementation and conformance tests.
 
-File-format and durability contract is defined in `FileFormatSpec.md`.
+File-format and recoverability contract is defined in
+`FileFormatSpec.md`.
 
 `APIDesign.md` owns API shape and API-observable guarantees only.
 `FileFormatSpec.md` owns persistence terminology and wire-format
@@ -35,7 +36,7 @@ public protocol PersistentLogStore: Sendable {
     /// Successful append reaches admission. Producer sequence remains
     /// producer-owned metadata.
     func append(_ envelope: PersistentLogEnvelope) async throws
-    /// Performs store flush; durability contract lives in FileFormatSpec.md.
+    /// Performs store flush; recoverability contract lives in FileFormatSpec.md.
     func flush() async throws
 }
 ```
@@ -63,7 +64,11 @@ public final class LogRecordPersistentEncoder: @unchecked Sendable {
 
 Encoder guarantees:
 
-- Produces redacted package-owned payloads.
+- Produces redacted package-owned payloads. Privacy redaction applies
+  to message privacy segments and attribute values; record `domain`,
+  attribute keys, and object keys are schema/key material and are
+  persisted verbatim. Callers must keep those names non-sensitive and
+  PII-free.
 - Sequence assignment is per-encoder-instance monotonic.
 - Does not perform store admission.
 
@@ -176,6 +181,23 @@ Error guarantees:
 - Invariant failures report implementation defects, not caller
   validation failures.
 
+Storage permissions:
+
+- A directory the file-store creates itself is owner-only
+  (`0o700`); a pre-existing directory at the configured path
+  is left as-is and the file-store never tightens its
+  permissions.
+- A segment file the file-store creates (under any rotation
+  policy) is owner-only (`0o600`); a pre-existing segment file
+  is reused without permission change.
+- Compaction never widens segment permissions past the
+  writer-private (`0o600` / `0o700`) default; group and world
+  bits are dropped from the replacement segment even if the
+  pre-compaction boundary segment carried them.
+- The file-store does not mutate any process-wide permission
+  state (no `umask` mutation) and the writer-private contract
+  does not depend on the process umask.
+
 ## Byte-stable export -- M3.3.2
 
 `FileLogStore` exposes a concrete typed export method. The portable
@@ -203,19 +225,30 @@ Public error surface lives in
 - `FileLogStoreExportError.interiorCorruption(segmentURL:byteOffset:classification:)`
 - `FileLogStoreExportError.invalidDestination(reason:)`
 
+For `operationFailed`, `url` is the operation-relevant URL; it is not
+always the final destination URL. For `interiorCorruption`,
+`segmentURL` identifies the scanned source segment, while `byteOffset`
+is the byte offset in the accepted-ordering export stream defined by
+`FileFormatSpec.md`, not a segment-local offset or a raw file
+EOF-relative offset. Destination validation happens before export
+boundary capture, so `invalidDestination` does not authorize removal.
+
 The public `FileLogStoreExportCorruptionClass` taxonomy is part of
-the file-store export compatibility contract. Adding a new internal
-classification requires a public addition before it can be projected.
+the file-store export source/API compatibility contract. Adding a new
+internal classification requires a public addition before it can be
+surfaced through the public export API. Unknown internal corruption
+classes must not be mapped onto an existing public class only to avoid
+a public API addition.
 
 Serialization semantics:
 
 - `exportLogs(to:)` holds the nonreentrant operation boundary for
   export discovery and export writes. Concurrent `append`, `flush`,
   `exportLogs(to:)`, and `removeExportedLogs()` callers wait until
-  the export releases that boundary.
+  the export releases the nonreentrant operation boundary.
 - `exportLogs(to:)` does not call `flush()` implicitly. Recoverable
-  visibility is the durability boundary. Callers that want
-  export-after-flush call `flush()` themselves.
+  visibility defines the persistence contract boundary. Callers that
+  want export-after-flush call `flush()` themselves.
 - Bytes outside a segment's recoverable prefix are never exported.
 
 Atomicity contract:
@@ -226,15 +259,18 @@ Atomicity contract:
 - Export writes to a unique temporary file inside a private
   temporary directory in the destination parent using no-overwrite
   creation semantics.
-- Export destination file permissions are governed by platform
-  umask during export destination creation; the API does not
-  force an owner-only mode.
-- The temporary file's contents are made durable before the atomic
-  commit.
+- Export destination file is created owner-only (`0o600`) and
+  the atomic rename preserves that mode on the final entry.
+  The API does not depend on the process umask and does not
+  mutate any process-wide permission state.
+- A symlink at the destination parent path is rejected as
+  `.invalidDestination(.parentDirectoryInvalid)` and the
+  symlink target is not written to.
+- The temporary file's contents are flushed before the atomic commit.
 - Final commit is atomic and must not overwrite an existing
   destination.
-- Destination-parent directory-entry durability after commit is
-  best-effort.
+- Destination-parent directory-entry persistence after commit is
+  best-effort and not verified by the API.
 - On any failure between create and commit the export attempts
   temporary-file cleanup. The export never creates partial final bytes
   and never overwrites a destination that materializes concurrently.
@@ -245,15 +281,17 @@ Bytes contract:
   discovered segments in accepted ordering (`.never` →
   `log.ndjson`; `.bySize` → rotated segments ascending by
   numeric sequence).
-- Accepted bytes are preserved byte-for-byte from each segment's
-  recoverable prefix in accepted ordering. No decoding,
-  re-encoding, canonicalization, or extra LF/footer occurs.
+- Accepted bytes are preserved byte-for-byte without normalization from
+  each segment's recoverable prefix in accepted ordering, including
+  duplicate sequence values. No decoding, re-encoding,
+  canonicalization, or extra LF/footer occurs.
 - Empty recoverable prefix → 0-byte file at the destination,
   success.
 - Interior corruption mid-scan aborts before commit; the export
   creates no final URL and attempts temp cleanup.
 - Duplicate `sequence` values are preserved verbatim; logical
-  duplicate detection is a separate future API.
+  duplicate detection is a separate future API outside the export
+  contract.
 
 ## Destructive removal -- M3.3.2
 
@@ -294,24 +332,25 @@ Serialization semantics:
 - `removeExportedLogs()` holds the nonreentrant operation boundary
   while processing the removal boundary. Concurrent `append`,
   `flush`, `exportLogs(to:)`, and `removeExportedLogs()` callers
-  wait until removal releases that boundary.
+  wait until removal releases the nonreentrant operation boundary.
 - Once physical removal begins, the destructive mutation path does
   not suspend.
 
 Removal mechanics:
 
 - Fully exported non-active rotated segments are unlinked.
-- Fully exported active segments preserve no accepted bytes before the
-  removal boundary, and subsequent appends continue after the preserved
-  removal boundary.
+- Fully exported active segments preserve no accepted bytes preceding
+  the removal boundary, and subsequent appends continue from the reset
+  active segment.
 - Segments with post-boundary bytes preserve the post-boundary suffix
   byte-for-byte through a unique sibling temporary file whose contents
-  are made durable before the atomic commit that replaces the original
+  are flushed before the atomic commit that replaces the original
   segment.
 - Removal never treats `exportedPrefixEnd` as the new segment length;
   that would keep exported bytes and delete post-boundary bytes.
 - Active-segment compaction coordinates with writer ownership so
-  appends continue after the preserved removal boundary.
+  appends continue after the preserved post-boundary suffix without
+  replay or re-encoding.
 
 Failure and retry contract:
 
@@ -321,12 +360,13 @@ Failure and retry contract:
   closed.
 - Stale boundary detection yields `.removalBoundaryStale` before
   destructive mutation of that entry.
-- Removal is retryable per segment, not all-or-nothing across all
-  entries. Completed destructive steps are not retried.
+- Removal is retryable per segment within a captured boundary after
+  partial destructive progress, not all-or-nothing across all entries.
+  Completed destructive steps are not retried.
 - On failure, the remaining in-memory boundary is retained for retry.
 - On full success, the boundary is cleared. A second remove without a
   new successful export fails with `.noExportedRemovalBoundary`.
-- Directory-entry durability after unlink or replace is best-effort
+- Directory-entry persistence after unlink or replace is best-effort
   and must not be overclaimed.
 
 ## Rotation and retention
@@ -391,11 +431,13 @@ encoded-line cap must be admittable into a fresh empty segment; a
 smaller cap would force retention to consider deleting a segment
 containing the line that just admitted it.
 
-Retention enforcement runs after a successful `append` admission while
-the append still holds the nonreentrant operation boundary. Concurrent
-`append`, `flush`, `exportLogs(to:)`, and `removeExportedLogs()`
-callers wait until the append plus retention enforcement releases that
-boundary. Rejected appends never trigger retention.
+Retention enforcement runs after a successful `append` admission inline
+while the append still holds the nonreentrant operation boundary.
+Concurrent `append`, `flush`, `exportLogs(to:)`, and
+`removeExportedLogs()` callers wait until the append plus retention
+enforcement releases that nonreentrant operation boundary. Rejected
+appends never trigger retention enforcement. A failed retention pass
+does not roll back the admitted append.
 
 Under `RotationPolicy.bySize(maxSegmentBytes:)`, retention enumerates
 regular rotated segments by numeric sequence and deletes whole rotated
@@ -408,8 +450,8 @@ model. `RetentionPolicy.unlimited` is a no-op under any rotation.
 If retention deletion fails, the triggering append remains admitted
 and the caller receives `.operationFailed(.enforceRetention, url:
 ..., context: ...)`. Later append/flush/export/remove operations
-operate on the recoverable topology left by the failed pass.
-Directory-entry durability after unlink is best-effort and must not
+operate on the recoverable on-disk topology left by the failed pass.
+Directory-entry persistence after unlink is best-effort and must not
 be overclaimed.
 
 Retention does not create, consume, or modify the in-memory removal

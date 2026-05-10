@@ -14,7 +14,7 @@ import Foundation
 /// `exportLogs(to:)`; accepted bytes admitted after the
 /// successful export destination commit are preserved
 /// byte-for-byte. The full API-observable removal contract
-/// is owned by `Docs/APIDesign.md`.
+/// is owned by the API design.
 public protocol ExportableLogStore: Sendable {
     func exportLogs(to url: URL) async throws
     func removeExportedLogs() async throws

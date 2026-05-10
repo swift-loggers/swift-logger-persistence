@@ -3,33 +3,44 @@
 Normative wire-format and corruption contract for package-provided
 file-backed stores. `APIDesign.md` owns the Swift API;
 this document owns the portable on-disk profile for stores and
-package-provided replay/export behavior.
+package-provided export behavior and future replay behavior.
 
 This document is the single normative source for the persistence contract;
 conflicting wording elsewhere is non-authoritative. Normative keywords
 (`MUST`, `MUST NOT`, `SHOULD`) are authoritative only here, and
 normative examples are binding unless marked illustrative.
-Compatibility is defined by observable bytes and corpus results, not
-implementation strategy; observable bytes outrank implementation
-internals.
+Compatibility for approved parser profiles is defined by observable
+bytes and corpus results, not implementation strategy; observable bytes
+outrank implementation internals. Approved parser profiles are listed in
+[Corpus Governance](#corpus-governance). Compatibility outside approved
+parser profiles is not claimed.
 
 ## Defined Terms
 
 - **Accepted line**: the primary persistence unit; one complete
   LF-terminated envelope line admitted into the recoverable prefix.
 - **Accepted ordering**: file-format order of accepted lines in the
-  recoverable prefix.
+  recoverable prefix within one segment recovery view.
+  Multi-segment ordering is defined by storage/API layer contracts.
 - **Accepted bytes**: exact bytes of accepted lines, including
   delimiters.
 - **Canonical bytes**: byte spelling required by this profile for
   encoded envelopes and package-owned payloads.
 - **Recoverable prefix**: byte prefix ending after the last complete
   accepted line.
-- **Recoverable visibility**: accepted lines in the recoverable prefix.
+- **Recoverable visibility**: set of accepted lines in the recoverable
+  prefix that are visible to public export behavior and future replay
+  behavior; this is not a general durability or fsync guarantee.
 - **Append unit**: pre-admission line candidate; after admission it is an
   accepted line.
-- **Replay identity**: byte-exact identity of accepted bytes, including
-  delimiters and accepted ordering.
+- **Replay identity**: historical compatibility term for byte-exact
+  identity of accepted bytes, including delimiters and accepted
+  ordering. It names the invariant for current export behavior and
+  future replay behavior; it is not current replay API surface.
+- **Without normalization**: byte-preserving behavior that performs no
+  decoding/re-encoding, canonicalization, trimming, case folding,
+  locale comparison, Unicode normalization, or decoded-equivalent
+  substitution.
 
 Terminology is locked to the terms above. New invariants require:
 
@@ -41,9 +52,10 @@ Terminology is locked to the terms above. New invariants require:
 Forbidden aliases in portable docs:
 
 - `accepted envelope bytes` -> `accepted bytes`
-- `accepted line order` and `replay/export ordering` -> `accepted ordering`
+- `accepted line order` and `export/future replay ordering` -> `accepted ordering`
 - `recoverable durability` -> `recoverable visibility`
 - `canonical deterministic bytes` -> `canonical bytes`
+- `normalization-free` -> `without normalization`
 - `append unit` only before admission; after admission use `accepted line`
 
 Other documents reference these terms instead of redefining them.
@@ -84,19 +96,21 @@ Each append unit is exactly one LF-terminated JSON object.
 ### Identity and Ordering Fields
 
 - `id` text MUST use canonical hyphenated RFC 4122 form with lower-case
-  hexadecimal digits (`8-4-4-4-12`). Replay/export parsers MUST reject
-  uppercase hex, braces, `urn:uuid:` prefixes, unhyphenated text, and
-  other alternate spellings instead of canonicalizing them. This
+  hexadecimal digits (`8-4-4-4-12`). Export parsers and future replay
+  parsers MUST reject uppercase hex, braces, `urn:uuid:` prefixes,
+  unhyphenated text, and other alternate spellings instead of
+  canonicalizing them. This
   intentionally diverges from Foundation `UUID(uuidString:)`
   permissiveness.
 - UUID validation MUST NOT delegate directly to permissive Foundation
   parsing.
 - UTF-8 corruption validation precedes field validation.
-- Canonical UUID spelling is a compatibility contract. Replay/export
-  comparison is byte-exact and never locale-aware; invalid spelling is
-  rejected before replay identity comparison.
+- Canonical UUID spelling is a compatibility contract. Export
+  comparison and future replay comparison are byte-exact and never
+  locale-aware; invalid spelling is rejected before replay identity
+  comparison.
 - `sequence` valid values are `1...UInt64.max`; `0` is reserved and
-  invalid. Sequence wrap must fail before emitting an envelope.
+  invalid. Sequence wrap MUST fail before emitting an envelope.
 - Sequence comparison is numeric, not lexical.
 - Sequence ordering is independent from filesystem append or concurrent
   execution order.
@@ -118,23 +132,23 @@ Each append unit is exactly one LF-terminated JSON object.
   use a structured syntax suffix (`+json`).
 - UTF-8 byte length, not scalar count, defines text limits.
 - `contentType` bytes participate in replay identity exactly as
-  persisted. Matching is byte-exact, normalization-free, and performs no
-  trimming, case folding, or Unicode equivalence checks.
+  persisted. Matching is byte-exact, without normalization, and
+  performs no trimming, case folding, or Unicode equivalence checks.
 
 ### Hint Fields
 
 Structure:
 
-- `hints` may contain at most 16 entries. Hint keys must be 1...128
+- `hints` may contain at most 16 entries. Hint keys MUST be 1...128
   UTF-8 bytes using only ASCII letters, digits, `.`, `_`, and `-`. Hint
-  values must be valid Swift `String` values, at most 512 UTF-8 bytes,
-  and must not contain ASCII control characters (`U+0000`...`U+001F`,
+  values MUST be valid Swift `String` values, at most 512 UTF-8 bytes,
+  and MUST NOT contain ASCII control characters (`U+0000`...`U+001F`,
   `U+007F`). Control-character detection is scalar-based.
 
 Privacy:
 
 - Hints are optional metadata for package filtering and indexing, not
-  authoritative payload. They must not contain raw private or sensitive
+  authoritative payload. They MUST NOT contain raw private or sensitive
   data.
 - Hint iteration order is ignored unless explicitly versioned and MUST
   NOT affect accepted ordering or byte-stable export.
@@ -155,10 +169,10 @@ Privacy:
 - Line-size validation uses UTF-8 bytes after canonical JSON encoding.
 - Base64 spelling is a compatibility contract.
 - Wrappers above persistence do not relax the payload limit: bytes handed
-  to persistence must still fit the 1 MiB portable limit.
+  to persistence MUST still fit the 1 MiB portable limit.
 
 Package-provided stores MUST reject over-limit envelopes before writing
-bytes for that envelope.
+bytes or mutating rotation state for that envelope.
 
 ### String Encoding
 
@@ -170,7 +184,7 @@ UTF-8 validity is checked before field validation.
 - `contentType` and hint key comparison are exact and case-sensitive.
   Stores and routers MUST NOT trim, lowercase, uppercase, or otherwise
   canonicalize `contentType`.
-- Persisted text bytes must remain byte-stable across supported
+- Persisted text bytes MUST remain byte-stable across supported
   platforms without lossy conversion, replacement characters, default
   encodings, or platform transcoding.
 - The persistence layer MUST NOT normalize Unicode (`NFC`, `NFD`, or any
@@ -180,16 +194,17 @@ UTF-8 validity is checked before field validation.
 
 An envelope is not accepted into storage until validation succeeds.
 Validation completes before any storage mutation for that envelope.
-Before admission, package-provided stores must not write bytes or mutate
+Before admission, package-provided stores MUST NOT write bytes or mutate
 rotation state for the envelope.
 
 Successful admission creates exactly one accepted line and extends
-accepted ordering. Rejected envelopes do not affect accepted ordering,
-and no accepted bytes for that envelope exist before admission.
+accepted ordering. Rejected envelopes MUST NOT affect accepted
+ordering, and accepted bytes for that envelope MUST NOT exist before
+admission.
 
 Envelope JSON encoding failures after successful field validation are
 reported as `.operationFailed(operation: .encodeEnvelope, ...)`, not
-`invalidEnvelope`.
+`invalidEnvelope`, and do not admit accepted bytes.
 
 ### Validation Precedence
 
@@ -226,7 +241,7 @@ normalization.
 
 For identical extracted field values, validation precedence is
 deterministic. Within one package major version,
-package-provided stores must not change which validation case is reported
+package-provided stores MUST NOT change which validation case is reported
 first for the same invalid envelope bytes after structural extraction.
 
 Failures before field extraction follow the corruption corpus, not this
@@ -244,7 +259,7 @@ Package-owned JSON payloads follow these canonical byte requirements:
 - object keys are sorted at every depth, including nested
   `LogValue.object` dictionaries and future map-shaped payload fields,
   recursively before serialization
-- dictionary insertion order must never affect encoded bytes
+- dictionary insertion order MUST NOT affect encoded bytes
 - UUID text uses lower-case canonical RFC 4122 spelling
 - non-ASCII scalar values are emitted as UTF-8 characters rather than
   normalized or force-converted to `\u` escapes
@@ -256,9 +271,9 @@ Package-owned JSON payloads follow these canonical byte requirements:
   exponent zeros, and no trailing fractional zeros
 - non-finite floating-point values are invalid in the portable JSON
   payload profile
-- encoded bytes must not depend on caller locale, calendar, time-zone, date
+- encoded bytes MUST NOT depend on caller locale, calendar, time-zone, date
   formatter state, CPU architecture, or Swift `Dictionary` iteration
-  order, and must remain stable across supported architectures and
+  order, and MUST remain stable across supported architectures and
   package patch releases unless a new `contentType` / version is
   declared
 
@@ -269,8 +284,8 @@ folding, scalar-equivalence checks, or dictionary insertion order. The
 comparator applies before JSON string serialization.
 
 If a future Foundation release changes encoded bytes for this profile,
-the package must shim or replace that encoder to preserve byte stability, or
-publish a new `contentType` / declared compatibility break.
+the package MUST shim or replace that encoder to preserve byte stability,
+or publish a new `contentType` / declared compatibility break.
 
 ### Payload Format Versioning
 
@@ -281,12 +296,17 @@ suffix form; the redacted `LogRecord` payload uses
 
 Package-owned `contentType` versions are append-only and reserved to
 this package within one package major version. Unknown future versions
-are opaque, not invalid. Future replay/export implementations must
-preserve accepted bytes and accepted ordering for those envelopes. Unknown
-versions are never auto-upgraded or treated as known versions.
+are opaque, not invalid. Current export implementations and future
+replay implementations MUST preserve accepted bytes and accepted
+ordering for those envelopes. Unknown versions are never auto-upgraded
+or treated as known versions.
 
 In that payload, private and sensitive attribute values become
 `LogValue.string("<private>")` and `LogValue.string("<redacted>")`.
+Privacy redaction applies to message privacy segments and attribute
+values only; record `domain`, attribute keys, and object keys are
+schema/key material and are persisted verbatim. Callers MUST keep
+those names non-sensitive and PII-free.
 
 Payload shape changes require a new package-owned `contentType` version
 or a declared compatibility break.
@@ -299,15 +319,16 @@ or a declared compatibility break.
 A successful append admits exactly one accepted line.
 
 Package-provided file stores validate envelope metadata, raw payload, and
-encoded line size before admission. Partial lines never become
-recoverable.
+encoded line size before admission. For every validation failure, stores
+MUST reject before writing bytes for that envelope or mutating rotation
+state. Partial lines never become recoverable.
 
 ### Append Rotation Interaction
 
-Future rotation or multi-segment layouts preserve append cardinality.
+Rotation or multi-segment layouts preserve append cardinality.
 LF delimiter ownership remains append-local across rotation.
-Rotation must preserve the append being processed as one accepted line:
-it must not split one envelope across segments, duplicate it as multiple
+Rotation MUST preserve the append being processed as one accepted line:
+it MUST NOT split one envelope across segments, duplicate it as multiple
 recoverable lines, or make append success depend on reading multiple
 segments.
 Rotation boundaries do not affect accepted bytes or accepted ordering.
@@ -317,8 +338,8 @@ Rotation boundaries do not affect accepted bytes or accepted ordering.
 Failed or interrupted appends are interpreted through the
 recoverable-prefix contract below.
 
-- Bytes beyond the recoverable prefix are not replay/export input under
-  any parser profile.
+- Bytes beyond the recoverable prefix are not export input or future
+  replay input under any parser profile.
 - They MUST NOT influence accepted ordering or replay identity and are
   never canonicalized.
 
@@ -326,6 +347,9 @@ recoverable-prefix contract below.
 
 `flush()` is a best-effort local synchronization boundary for accepted
 appends; it preserves but never expands recoverable visibility.
+`flush()` does not change parser acceptance, accepted ordering, or the
+recoverable prefix boundary.
+Flush failure MUST NOT create or remove accepted lines.
 Package-provided stores define one append/flush operation order. A flush
 includes every append accepted earlier in that operation order. Caller
 invocation order is not a guarantee.
@@ -334,13 +358,14 @@ invocation order is not a guarantee.
 
 Cancellation has no separate acceptance outcome: the operation either
 admits one accepted line or rejects, even under task cancellation races.
-A cancelled task may still receive success if the operation already
-completed.
+Cancellation MUST NOT produce a partial accepted line. A cancelled task
+may still receive success if the operation already completed.
 
 ### Implementation Invariant Diagnostics
 
-Invariant cases report implementation defects. Public diagnostics are
-append-only within one package major version.
+Invariant cases report implementation defects, not portable corruption
+outcomes or corpus classes. Public diagnostics are append-only within
+one package major version.
 
 #### Append
 
@@ -385,7 +410,7 @@ line and contains no corrupted interior line.
 
 Recoverable prefix discovery MUST start at byte 0. Discovery is
 deterministic for identical bytes and monotonic for a successfully
-processed segment. Discovery must not reorder accepted lines.
+processed segment. Discovery MUST NOT reorder accepted lines.
 
 Recovery may discard bytes after the recoverable prefix; recoverable
 visibility and accepted ordering remain unchanged. Trailing partial
@@ -395,44 +420,47 @@ necessary but not sufficient for validity.
 A LF-terminated line that contains malformed UTF-8, malformed JSON, a
 non-object JSON value, duplicate JSON object member names, malformed
 base64, or a JSON object that is not a valid envelope is interior
-corruption, not a partial tail. Replay/export implementations must fail
-at the interior-corruption boundary. They must not truncate at the
-previous LF and silently discard already acknowledged lines after the
-corrupted one.
+corruption, not a partial tail. Current export implementations and
+future replay implementations MUST fail at the interior-corruption
+boundary. They MUST NOT truncate at the previous LF and silently discard
+already acknowledged lines after the corrupted one.
 
 Corruption classification outranks recovery heuristics.
-Prefix discovery never skips corrupted interior lines.
+Prefix discovery never skips corrupted interior lines within the
+scanned segment.
 Interior corruption is never downgraded to trailing truncation.
 
 For APIs that expose whole-operation success or failure, interior
-corruption is a hard stop: the operation must throw or return a typed
-corruption result and must not report success with partial progress. A
-future partial-recovery mode must be named explicitly and must return the
+corruption is a hard stop: the operation MUST throw or return a typed
+corruption result and MUST NOT report success with partial progress. A
+future partial-recovery mode MUST be named explicitly and MUST return the
 accepted prefix and corruption boundary as structured data.
 
 ### Byte-Stable Export
 
-Export MUST preserve accepted ordering independent of filesystem
-enumeration order or segment naming, and reproduce selected accepted
-bytes exactly. It must not synthesize new canonical bytes or decode and
-re-encode a decoded-equivalent envelope.
+Export MUST preserve accepted ordering for the selected export range
+defined by a higher storage/API layer such as the `APIDesign.md` export
+boundary, independent of filesystem enumeration order or segment naming,
+and reproduce selected accepted bytes exactly. It MUST NOT synthesize
+new canonical bytes or decode and re-encode a decoded-equivalent
+envelope.
 Export never rewrites LF delimiter ownership.
 
 ### Logical Export
 
 A separate logical export API may decode and normalize. Logical export
-intentionally breaks byte identity and must declare its schema before it
-lands.
+intentionally breaks byte identity and replay identity and MUST declare
+its schema before it lands.
 
 ### Duplicate JSON Object Members
 
 Duplicate JSON object member names are rejected: no first-wins or
 last-wins outcome is portable. This applies to the outer envelope
 JSON object and to package-owned JSON payloads when those payloads are
-decoded by package APIs. Foundation parsers must not be assumed to reject
-duplicate member names automatically; package decode, replay, and export
-code must use explicit duplicate-member detection or a parser mode proven
-by the conformance corpus.
+decoded by package APIs. Foundation parsers MUST NOT be assumed to reject
+duplicate member names automatically; package decode, export, and future
+replay code MUST use explicit duplicate-member detection or a parser
+mode proven by the conformance corpus.
 
 Duplicate detection is recursive at every object depth and precedes
 field handling.
@@ -443,22 +471,25 @@ outcomes.
 ## 6. Corpus Governance
 
 The package conformance corpus defines corruption detection. Approved
-profiles must match corpus results for accepted bytes, rejected bytes,
+profiles MUST match corpus results for accepted bytes, rejected bytes,
 classification, and recovery boundary.
 
 The corpus is owned by the `swift-logger-persistence` maintainers.
 Fixtures and expected results are normative, an append-only compatibility
 contract within one major version. New fixtures may be added for newly
-specified corruption classes, but additions require PR review. A fixture
-that creates a new corruption class, changes a compatibility contract, or
-changes an existing expected result requires an ADR or ADR update.
+specified corruption classes, but additions require version-control
+review. A fixture that creates a new corruption class, changes a
+compatibility contract, or changes an existing expected result requires
+an ADR or ADR update.
 
 Once released, corpus fixture bytes are immutable canonical test vectors
 within one package major version. Fixture ordering is meaningful only
 when it explicitly tests ordering.
 
-Approved profiles include Darwin Foundation. Additional parser profiles
-require explicit platform support and corpus approval.
+Approved parser profiles include Darwin Foundation as a parser profile;
+this is not a platform/runtime compatibility statement. Additional
+parser profiles require explicit platform support and documented corpus
+approval.
 Parser replacement is compatible only when corpus outcomes are preserved
 exactly:
 
@@ -473,8 +504,8 @@ Changing corpus-defined corruption classes is compatibility-breaking.
 
 ### Minimum Corpus Coverage
 
-Before replay/export lands, the corpus must cover at least these fixture
-categories:
+Before replay lands and before new export parser behavior ships, the
+corpus MUST cover at least these fixture categories:
 
 - UTF-8 corruption
 - JSON corruption
@@ -489,6 +520,7 @@ Detailed fixture candidates live in `CorpusSpec.md`.
 
 ## Operational Notes
 
-Single-segment filenames are outside this portable format contract.
-Segment naming, rotation boundaries, and retention are separate policy
-contracts.
+Single-segment filenames are outside this portable format contract
+unless explicitly versioned by a higher-level storage contract.
+File-store storage contracts may specify them elsewhere. Segment naming,
+rotation boundaries, and retention are separate policy contracts.

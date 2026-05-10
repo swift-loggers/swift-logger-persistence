@@ -14,8 +14,8 @@ extension FileLogStore: ExportableLogStore {
     /// that boundary.
     ///
     /// The full removal-boundary, atomicity, and failure-path
-    /// contracts are owned by `Docs/APIDesign.md`
-    /// ("Destructive removal").
+    /// contracts are owned by the API design ("Destructive
+    /// removal").
     ///
     /// - Throws: ``FileLogStoreRemoveError/noExportedRemovalBoundary``
     ///   when no successful export has captured a boundary in
@@ -339,7 +339,7 @@ extension FileLogStore {
             context: FileSystemErrorContext(
                 domain: NSPOSIXErrorDomain,
                 code: Int(savedErrno),
-                description: "openat(removal segment) failed"
+                description: "removal segment open failed"
             )
         )
     }
@@ -364,7 +364,7 @@ extension FileLogStore {
                 context: FileSystemErrorContext(
                     domain: NSPOSIXErrorDomain,
                     code: Int(savedErrno),
-                    description: "unlinkat(rotated segment) failed"
+                    description: "rotated segment unlink failed"
                 )
             )
         }

@@ -4,13 +4,14 @@ import Testing
 
 @testable import LoggerFilePersistence
 
-/// Failure-mid-removal coverage: a per-segment failure must
-/// retain only the unprocessed boundary tail for retry, and a
-/// subsequent successful call must complete the remainder
-/// before clearing the boundary.
+/// Failure-path coverage for destructive removal retry boundaries.
 @Suite("FileLogStore destructive removal — failure retains remaining")
 struct FileLogStoreRemoveFailureTests {
-    private struct SentinelError: Error {}
+    private struct SentinelError: Error, CustomNSError {
+        static let errorDomain = "FileLogStoreRemoveFailureTests.SentinelError"
+        static let staticErrorCode: Int = 0
+        var errorCode: Int { Self.staticErrorCode }
+    }
 
     private static func uniqueDirectory() -> URL {
         FileLogStoreTestSupport.uniqueDirectory()
@@ -28,10 +29,126 @@ struct FileLogStoreRemoveFailureTests {
         return (parent.appendingPathComponent("export.ndjson"), parent)
     }
 
-    /// Sets up a `.bySize` store with three rotated segments and
-    /// captures a removal boundary spanning all three. Returns
-    /// the store and the export parent URL the caller is
-    /// responsible for cleaning up.
+    private static func castRemoveError(
+        _ error: any Error
+    ) -> FileLogStoreRemoveError? {
+        guard let removeError = error as? FileLogStoreRemoveError else {
+            Issue.record(
+                "expected FileLogStoreRemoveError, got \(type(of: error)): \(error)"
+            )
+            return nil
+        }
+        return removeError
+    }
+
+    /// Asserts operation failure and pinned sentinel NSError projection.
+    private static func expectOperationFailedPayload(
+        _ error: any Error,
+        operation expectedOperation: FileLogStoreRemoveOperation,
+        expectedURL: URL? = nil
+    ) {
+        guard let removeError = Self.castRemoveError(error) else { return }
+        switch removeError {
+        case let .operationFailed(operation, url, context):
+            #expect(operation == expectedOperation)
+            if let expectedURL {
+                #expect(url == expectedURL)
+            }
+            #expect(context.domain == SentinelError.errorDomain)
+            #expect(context.code == SentinelError.staticErrorCode)
+        default:
+            Issue.record(
+                "expected .operationFailed(.\(expectedOperation)), got \(removeError)"
+            )
+        }
+    }
+
+    /// Asserts body throws the expected operation failure.
+    private static func expectOperationFailed(
+        operation: FileLogStoreRemoveOperation,
+        expectedURL: URL? = nil,
+        when body: () async throws -> Void
+    ) async {
+        do {
+            try await body()
+            Issue.record("expected .operationFailed(.\(operation)) but call succeeded")
+        } catch {
+            Self.expectOperationFailedPayload(
+                error, operation: operation, expectedURL: expectedURL
+            )
+        }
+    }
+
+    private static func expectNoRemovalBoundary(
+        when body: () async throws -> Void
+    ) async {
+        do {
+            try await body()
+            Issue.record("expected .noExportedRemovalBoundary")
+        } catch {
+            guard let removeError = Self.castRemoveError(error) else { return }
+            switch removeError {
+            case .noExportedRemovalBoundary:
+                break
+            default:
+                Issue.record("expected .noExportedRemovalBoundary, got \(removeError)")
+            }
+        }
+    }
+
+    /// Runs body with seam installed and clears it before returning.
+    private static func withInstalledSeam(
+        install: () async -> Void,
+        cleanup: () async -> Void,
+        body: () async throws -> Void
+    ) async throws {
+        await install()
+        var capturedError: (any Error)?
+        do {
+            try await body()
+        } catch {
+            capturedError = error
+        }
+        await cleanup()
+        if let capturedError { throw capturedError }
+    }
+
+    private static func withReopenActiveSegmentFailure(
+        on store: FileLogStore,
+        body: () async throws -> Void
+    ) async throws {
+        try await withInstalledSeam(
+            install: {
+                await store._setOnBeforeReopenActiveSegmentForTesting { _ in
+                    throw SentinelError()
+                }
+            },
+            cleanup: {
+                await store._setOnBeforeReopenActiveSegmentForTesting(nil)
+            },
+            body: body
+        )
+    }
+
+    private static func withProcessRemovalEntryFailure(
+        on store: FileLogStore,
+        target: URL,
+        body: () async throws -> Void
+    ) async throws {
+        try await withInstalledSeam(
+            install: {
+                await store._setOnBeforeProcessRemovalEntryForTesting { url in
+                    if url == target { throw SentinelError() }
+                }
+            },
+            cleanup: {
+                await store._setOnBeforeProcessRemovalEntryForTesting(nil)
+            },
+            body: body
+        )
+    }
+
+    /// Creates three rotated segments and captures a removal boundary.
     private static func setupBoundaryWithThreeRotatedSegments(
         directory: URL
     ) async throws -> (store: FileLogStore, exportParent: URL) {
@@ -63,39 +180,10 @@ extension FileLogStoreRemoveFailureTests {
         let directory = Self.uniqueDirectory()
         try Self.makeDirectory(directory)
         defer { FileLogStoreTestSupport.remove(directory) }
-        // Three rotated segments; log.000003 is the active
-        // writer. Removal will process them in boundary order.
         let (store, exportParent) = try await Self.setupBoundaryWithThreeRotatedSegments(
             directory: directory
         )
         defer { FileLogStoreTestSupport.remove(exportParent) }
-
-        // Configure a one-shot test seam that fails on the
-        // second entry (log.000002) only.
-        let failTarget = FileLogStoreTestSupport.rotatedSegmentURL(
-            in: directory, sequence: 2
-        )
-        await store._setOnBeforeProcessRemovalEntryForTesting { url in
-            if url == failTarget {
-                throw SentinelError()
-            }
-        }
-
-        // First call: processes log.000001 successfully, fails
-        // on log.000002, retains the unprocessed tail
-        // (log.000002 + log.000003) for retry.
-        do {
-            try await store.removeExportedLogs()
-            Issue.record("expected operationFailed during forced failure")
-        } catch {
-            switch error {
-            case let .operationFailed(operation, url, _):
-                #expect(operation == .validateBoundary)
-                #expect(url == failTarget)
-            default:
-                Issue.record("expected operationFailed, got \(error)")
-            }
-        }
 
         let seg1 = FileLogStoreTestSupport.rotatedSegmentURL(
             in: directory, sequence: 1
@@ -106,34 +194,38 @@ extension FileLogStoreRemoveFailureTests {
         let seg3 = FileLogStoreTestSupport.rotatedSegmentURL(
             in: directory, sequence: 3
         )
-        // log.000001 was processed successfully (unlinked).
-        #expect(!FileManager.default.fileExists(atPath: seg1.path))
-        // log.000002 and log.000003 untouched: failure happened
-        // before any destructive removal step for log.000002.
+        #expect(FileManager.default.fileExists(atPath: seg1.path))
         #expect(FileManager.default.fileExists(atPath: seg2.path))
         #expect(FileManager.default.fileExists(atPath: seg3.path))
 
-        // Clear the seam and retry — the retained tail must
-        // complete and the boundary must clear.
-        await store._setOnBeforeProcessRemovalEntryForTesting(nil)
+        let failTarget = seg2
+        try await Self.withProcessRemovalEntryFailure(
+            on: store, target: failTarget
+        ) {
+            await Self.expectOperationFailed(
+                operation: .validateBoundary, expectedURL: failTarget
+            ) {
+                try await store.removeExportedLogs()
+            }
+
+            // Failed entry and later entries remain retryable.
+            #expect(!FileManager.default.fileExists(atPath: seg1.path))
+            #expect(FileManager.default.fileExists(atPath: seg2.path))
+            #expect(FileManager.default.fileExists(atPath: seg3.path))
+        }
+
         try await store.removeExportedLogs()
 
+        #expect(!FileManager.default.fileExists(atPath: seg1.path))
         #expect(!FileManager.default.fileExists(atPath: seg2.path))
-        // log.000003 was active at export time; successful removal
-        // leaves no accepted bytes before the removal boundary.
         #expect(FileManager.default.fileExists(atPath: seg3.path))
         #expect(try Data(contentsOf: seg3).isEmpty)
 
-        try await Self.assertBoundaryClearedAfterSuccess(store: store)
+        await Self.assertNoRemovalBoundaryAfterDrain(store: store)
     }
 
-    /// Boundary tail must advance past entries whose
-    /// destructive mutation already completed, even when the
-    /// active-writer reopen step subsequently fails. Otherwise
-    /// retry would re-validate an already-mutated entry against
-    /// stale boundary metadata and fail closed permanently.
     @Test(
-        "Active-writer reopen failure advances boundary past the mutated entry",
+        "Reopen failure after mutation advances boundary",
         .tags(.lgp9, .lgp27)
     )
     func reopenFailureAfterMutationAdvancesBoundary() async throws {
@@ -144,8 +236,6 @@ extension FileLogStoreRemoveFailureTests {
             configuration: .init(directory: directory, rotation: .never)
         )
 
-        // Append → flush → export captures a `.never` boundary
-        // referencing the active segment.
         let envelope1 = try FileLogStoreTestSupport.makeEnvelope(
             sequence: 1, payload: Data([0x01])
         )
@@ -155,8 +245,6 @@ extension FileLogStoreRemoveFailureTests {
         defer { FileLogStoreTestSupport.remove(exportParent) }
         try await store.exportLogs(to: exportURL)
 
-        // Append a post-boundary line so destructive mutation is
-        // a compaction (not a fully-exported reset path).
         let envelope2 = try FileLogStoreTestSupport.makeEnvelope(
             sequence: 2, payload: Data([0x02])
         )
@@ -164,46 +252,22 @@ extension FileLogStoreRemoveFailureTests {
         try await store.flush()
         let line2 = try CanonicalEnvelopeLineEncoder().encode(envelope2)
 
-        await store._setOnBeforeReopenActiveSegmentForTesting { _ in
-            throw SentinelError()
-        }
-
-        do {
-            try await store.removeExportedLogs()
-            Issue.record("expected .operationFailed(.reopenActiveSegment)")
-        } catch {
-            switch error {
-            case let .operationFailed(operation, _, _):
-                #expect(operation == .reopenActiveSegment)
-            default:
-                Issue.record("expected reopenActiveSegment failure, got \(error)")
+        try await Self.withReopenActiveSegmentFailure(on: store) {
+            await Self.expectOperationFailed(operation: .reopenActiveSegment) {
+                try await store.removeExportedLogs()
             }
+
+            let segmentURL = directory.appendingPathComponent("log.ndjson")
+            let onDisk = try Data(contentsOf: segmentURL)
+            #expect(onDisk == line2)
         }
 
-        // Compaction already replaced the segment on disk;
-        // post-boundary suffix is preserved byte-for-byte.
-        let segmentURL = directory.appendingPathComponent("log.ndjson")
-        let onDisk = try Data(contentsOf: segmentURL)
-        #expect(onDisk == line2)
-
-        // Boundary tail advanced past the mutated entry: a
-        // retry without the seam must observe the
-        // no-remaining-boundary success path, not re-validate
-        // stale identity.
-        await store._setOnBeforeReopenActiveSegmentForTesting(nil)
         try await store.removeExportedLogs()
-
-        // After full success, boundary is cleared.
-        try await Self.assertBoundaryClearedAfterSuccess(store: store)
+        await Self.assertNoRemovalBoundaryAfterDrain(store: store)
     }
 
-    /// Failure after the destructive active-segment reset step
-    /// and before the writer-offset-reset step must advance the
-    /// boundary tail past the entry. Otherwise retry would
-    /// re-validate against stale boundary metadata and
-    /// fail closed permanently.
     @Test(
-        "Writer-offset reset failure after active-segment reset advances boundary past the entry",
+        "Writer-offset reset failure advances boundary",
         .tags(.lgp9, .lgp27)
     )
     func writerOffsetResetFailureAfterActiveSegmentResetAdvancesBoundary() async throws {
@@ -214,10 +278,6 @@ extension FileLogStoreRemoveFailureTests {
             configuration: .init(directory: directory, rotation: .never)
         )
 
-        // Append → flush → export captures the boundary at
-        // `exportedPrefixEnd == fileSize`. No post-export
-        // append, so the destructive path is active-segment reset
-        // (not compaction).
         let envelope = try FileLogStoreTestSupport.makeEnvelope(
             sequence: 1, payload: Data([0x01])
         )
@@ -227,43 +287,22 @@ extension FileLogStoreRemoveFailureTests {
         defer { FileLogStoreTestSupport.remove(exportParent) }
         try await store.exportLogs(to: exportURL)
 
-        await store._setOnBeforeReopenActiveSegmentForTesting { _ in
-            throw SentinelError()
-        }
-
-        do {
-            try await store.removeExportedLogs()
-            Issue.record("expected reopenActiveSegment failure after active-segment reset")
-        } catch {
-            switch error {
-            case let .operationFailed(operation, _, _):
-                #expect(operation == .reopenActiveSegment)
-            default:
-                Issue.record("expected reopenActiveSegment failure, got \(error)")
+        try await Self.withReopenActiveSegmentFailure(on: store) {
+            await Self.expectOperationFailed(operation: .reopenActiveSegment) {
+                try await store.removeExportedLogs()
             }
+
+            let segmentURL = directory.appendingPathComponent("log.ndjson")
+            let onDisk = try Data(contentsOf: segmentURL)
+            #expect(onDisk.isEmpty)
         }
 
-        // Active-segment reset already completed on disk.
-        let segmentURL = directory.appendingPathComponent("log.ndjson")
-        let onDisk = try Data(contentsOf: segmentURL)
-        #expect(onDisk.isEmpty)
-
-        // Boundary advanced past the destructive entry: a
-        // retry without the seam must observe the
-        // no-remaining-boundary success path, not re-validate
-        // against pre-reset boundary metadata.
-        await store._setOnBeforeReopenActiveSegmentForTesting(nil)
         try await store.removeExportedLogs()
-        try await Self.assertBoundaryClearedAfterSuccess(store: store)
+        await Self.assertNoRemovalBoundaryAfterDrain(store: store)
     }
 
-    /// Append after a failed active-segment reset path must land in a
-    /// fresh segment (not in the stale-offset pre-reset
-    /// handle), so the on-disk byte sequence is canonical and
-    /// contains no sparse gap between the active-segment reset
-    /// and the next admitted line.
     @Test(
-        "Append after failed active-segment reset path produces canonical bytes",
+        "Append after failed active reset stays canonical",
         .tags(.lgp9, .lgp24, .lgp25, .lgp27)
     )
     func appendAfterFailedResetProducesCanonicalBytes() async throws {
@@ -274,8 +313,6 @@ extension FileLogStoreRemoveFailureTests {
             configuration: .init(directory: directory, rotation: .never)
         )
 
-        // Append → flush → export captures the boundary at the
-        // active segment's full recoverable prefix.
         let envelope1 = try FileLogStoreTestSupport.makeEnvelope(
             sequence: 1, payload: Data([0x01])
         )
@@ -285,28 +322,12 @@ extension FileLogStoreRemoveFailureTests {
         defer { FileLogStoreTestSupport.remove(exportParent) }
         try await store.exportLogs(to: exportURL)
 
-        // Force the post-mutation step to fail after the
-        // destructive truncate has already completed on disk.
-        await store._setOnBeforeReopenActiveSegmentForTesting { _ in
-            throw SentinelError()
-        }
-        do {
-            try await store.removeExportedLogs()
-            Issue.record("expected post-mutation failure")
-        } catch {
-            switch error {
-            case .operationFailed:
-                break
-            default:
-                Issue.record("expected operationFailed, got \(error)")
+        try await Self.withReopenActiveSegmentFailure(on: store) {
+            await Self.expectOperationFailed(operation: .reopenActiveSegment) {
+                try await store.removeExportedLogs()
             }
         }
-        await store._setOnBeforeReopenActiveSegmentForTesting(nil)
 
-        // Subsequent append must produce a canonical on-disk
-        // sequence — exactly the new accepted line's bytes,
-        // with no hole or stale prefix carried over from the
-        // pre-reset writer offset.
         let envelope2 = try FileLogStoreTestSupport.makeEnvelope(
             sequence: 2, payload: Data([0x02])
         )
@@ -317,16 +338,13 @@ extension FileLogStoreRemoveFailureTests {
         let segmentURL = directory.appendingPathComponent("log.ndjson")
         let onDisk = try Data(contentsOf: segmentURL)
         #expect(onDisk == line2)
+
+        try await store.removeExportedLogs()
+        await Self.assertNoRemovalBoundaryAfterDrain(store: store)
     }
 
-    /// Append after a failed reopen-after-compaction must land
-    /// in the on-disk compacted segment at the boundary path,
-    /// not in the detached pre-compaction inode that the
-    /// pre-reopen writer handle still references. Catches
-    /// regressions where the writer is not invalidated after
-    /// the reopen step fails.
     @Test(
-        "Append after failed reopen-after-compaction produces canonical bytes",
+        "Append after failed compaction reopen stays canonical",
         .tags(.lgp9, .lgp24, .lgp25, .lgp27)
     )
     func appendAfterFailedReopenAfterCompactionProducesCanonicalBytes() async throws {
@@ -337,8 +355,6 @@ extension FileLogStoreRemoveFailureTests {
             configuration: .init(directory: directory, rotation: .never)
         )
 
-        // Append → flush → export captures the boundary at the
-        // active segment's full recoverable prefix.
         let envelope1 = try FileLogStoreTestSupport.makeEnvelope(
             sequence: 1, payload: Data([0x01])
         )
@@ -348,9 +364,6 @@ extension FileLogStoreRemoveFailureTests {
         defer { FileLogStoreTestSupport.remove(exportParent) }
         try await store.exportLogs(to: exportURL)
 
-        // Append a post-boundary line so destructive mutation is
-        // a compaction (atomic `renameat` replaces the active
-        // segment) — not a fully-exported reset.
         let envelope2 = try FileLogStoreTestSupport.makeEnvelope(
             sequence: 2, payload: Data([0x02])
         )
@@ -358,30 +371,12 @@ extension FileLogStoreRemoveFailureTests {
         try await store.flush()
         let line2 = try CanonicalEnvelopeLineEncoder().encode(envelope2)
 
-        // Force the reopen step to fail after the destructive
-        // atomic replacement has already completed on disk.
-        await store._setOnBeforeReopenActiveSegmentForTesting { _ in
-            throw SentinelError()
-        }
-        do {
-            try await store.removeExportedLogs()
-            Issue.record("expected .operationFailed(.reopenActiveSegment) after compaction")
-        } catch {
-            switch error {
-            case let .operationFailed(operation, _, _):
-                #expect(operation == .reopenActiveSegment)
-            default:
-                Issue.record("expected reopenActiveSegment failure, got \(error)")
+        try await Self.withReopenActiveSegmentFailure(on: store) {
+            await Self.expectOperationFailed(operation: .reopenActiveSegment) {
+                try await store.removeExportedLogs()
             }
         }
-        await store._setOnBeforeReopenActiveSegmentForTesting(nil)
 
-        // Subsequent append must land in the on-disk compacted
-        // segment at the boundary path. If the active writer
-        // were not invalidated after the failed reopen, the
-        // stale handle would reference the detached pre-
-        // compaction inode and the on-disk file would still
-        // contain only `line2` after the new append.
         let envelope3 = try FileLogStoreTestSupport.makeEnvelope(
             sequence: 3, payload: Data([0x03])
         )
@@ -392,24 +387,17 @@ extension FileLogStoreRemoveFailureTests {
         let segmentURL = directory.appendingPathComponent("log.ndjson")
         let onDisk = try Data(contentsOf: segmentURL)
         #expect(onDisk == line2 + line3)
+
+        try await store.removeExportedLogs()
+        await Self.assertNoRemovalBoundaryAfterDrain(store: store)
     }
 
-    /// Confirms successful removal cleared the in-memory
-    /// removal boundary by exercising the no-boundary path on
-    /// a follow-up call.
-    private static func assertBoundaryClearedAfterSuccess(
+    /// Asserts the next removal call reports no retained boundary.
+    private static func assertNoRemovalBoundaryAfterDrain(
         store: FileLogStore
-    ) async throws {
-        do {
+    ) async {
+        await Self.expectNoRemovalBoundary {
             try await store.removeExportedLogs()
-            Issue.record("expected .noExportedRemovalBoundary after full success")
-        } catch {
-            switch error {
-            case .noExportedRemovalBoundary:
-                break
-            default:
-                Issue.record("expected .noExportedRemovalBoundary, got \(error)")
-            }
         }
     }
 }
