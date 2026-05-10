@@ -1,13 +1,16 @@
-# M3.3.2 Byte-Stable Export SQE Coverage Map
+# Byte-Stable Export SQE Coverage Map
 
-This file maps M3.3.2 byte-stable export coverage across test suites
-and contract areas to byte-stable export contracts.
-Docs/FileFormatSpec.md owns file-format contracts.
-Docs/APIDesign.md owns API-observable export guarantees.
+This file maps byte-stable export coverage across test suites and
+contract areas to byte-stable export semantics.
+[`Docs/FileFormatSpec.md`](../../Docs/FileFormatSpec.md) owns
+file-format contracts.
+[`Docs/APIDesign.md`](../../Docs/APIDesign.md) owns
+API-observable contracts.
 
 This document is non-normative and does not define behavior.
 
-For the target-level index, see CoverageMap.md.
+For the target-level index, see
+[`CoverageMap.md`](CoverageMap.md).
 
 ## Coverage Matrix
 
@@ -22,6 +25,7 @@ For the target-level index, see CoverageMap.md.
 | Single-flight serialization | LGP-8, LGP-19, LGP-24, LGP-25, LGP-32 | `FileLogStoreExportTests.swift`, `OperationBoundaryTests.swift` | Concurrent export-against-append tests verify nonreentrant operation-boundary export behavior and stable accepted-byte export results. |
 | Empty recoverable prefix | LGP-8, LGP-32 | `FileLogStoreExportTests.swift`, `FileLogStoreExportRotatedTests.swift` | A `.never` store with no admitted lines and a `.bySize` store with no rotated segments each export a 0-byte file at the destination URL; the call returns successfully, no error variant is raised. |
 | Interior corruption hard-stop in export | LGP-8, LGP-17, LGP-32, LGP-35, LGP-37 | `FileLogStoreExportTests.swift`, `FileLogStoreExportRotatedTests.swift` | Interior corruption mid-scan aborts the export, projects to `FileLogStoreExportError.interiorCorruption` with the matching `FileLogStoreExportCorruptionClass`, and leaves the destination absent. Coverage spans single-segment `.never` and multi-segment `.bySize` (corruption in a non-terminal rotated segment); the segment URL reported in the error matches the corrupted segment, and covered paths observe no temp leftover in the destination parent. |
+| Replay identity for unknown `contentType` | LGP-8, LGP-27, LGP-30, LGP-31, LGP-32 | `FileLogStoreExportReplayIdentityTests.swift` | An admitted envelope whose `contentType` is outside any package-known profile is exported byte-for-byte, including the LF delimiter, in accepted ordering. Coverage spans `.never` (single segment) and `.bySize` (multiple rotated segments + active). No `contentType`-specific payload interpretation, upgrade, or export re-encoding determines the exported bytes; unknown `contentType` remains opaque end-to-end. |
 
 ## Review Checklist
 
@@ -33,4 +37,9 @@ For the target-level index, see CoverageMap.md.
 - Single-flight serialization is reviewed through observable
   nonreentrant operation-boundary behavior, not actor
   implementation details.
+- Replay identity is reviewed through accepted-byte preservation
+  across segment boundaries (including the LF delimiter) and
+  through unknown-`contentType` opacity along the export path.
+  No `contentType`-specific payload interpretation, upgrade, or
+  export re-encoding determines the exported bytes.
 - No single test is expected to prove the entire export contract alone.

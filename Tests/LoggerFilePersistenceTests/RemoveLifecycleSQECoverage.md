@@ -1,13 +1,16 @@
-# M3.3.2 Remove Lifecycle SQE Coverage Map
+# Remove Lifecycle SQE Coverage Map
 
-This file maps M3.3.2 destructive-removal coverage across test suites
-and contract areas to remove lifecycle contracts.
-Docs/APIDesign.md owns API-observable remove guarantees.
-Docs/FileFormatSpec.md owns accepted-byte and recoverable-prefix contracts.
+This file maps destructive-removal coverage across test suites
+and contract areas to remove lifecycle semantics.
+[`Docs/APIDesign.md`](../../Docs/APIDesign.md) owns
+API-observable remove contracts.
+[`Docs/FileFormatSpec.md`](../../Docs/FileFormatSpec.md) owns
+accepted-byte and recoverable-prefix contracts.
 
 This document is non-normative and does not define behavior.
 
-For the target-level index, see CoverageMap.md.
+For the target-level index, see
+[`CoverageMap.md`](CoverageMap.md).
 
 ## Coverage Matrix
 
@@ -30,7 +33,7 @@ For the target-level index, see CoverageMap.md.
   implementation comments.
 - Retry behavior is reviewed through failure-after-progress tests, not through a single all-success path.
 - Deferred-close discipline is reviewed through explicit
-  pending-close drain tests, not by assuming another public
+  pending-close queue drain tests, not by assuming another public
   operation will eventually drain the queue.
 - Active writer lifecycle is reviewed through post-remove append and post-mutation failure tests.
 - Stale-boundary safety is reviewed through identity, topology, and size mismatch tests.

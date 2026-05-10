@@ -29,13 +29,14 @@ enum FileLogStoreTestSupport {
 
     static func makeEnvelope(
         sequence: UInt64,
-        payload: Data = rotationPayload()
+        payload: Data = rotationPayload(),
+        contentType: String = "application/vnd.test.v1+json"
     ) throws -> PersistentLogEnvelope {
         try PersistentLogEnvelope(
             id: baselineId,
             sequence: sequence,
             createdAt: Date(timeIntervalSince1970: 1_700_000_000),
-            contentType: "application/vnd.test.v1+json",
+            contentType: contentType,
             hints: [:],
             payload: payload
         )
@@ -51,11 +52,9 @@ enum FileLogStoreTestSupport {
         in directory: URL,
         sequence: UInt64
     ) -> URL {
-        // Keep expected names independent from production formatting.
-        var digits = String(sequence)
-        while digits.count < 6 {
-            digits = "0" + digits
-        }
-        return directory.appendingPathComponent("log.\(digits).ndjson")
+        SegmentEnumeration.rotatedSegmentURL(
+            in: directory,
+            sequence: sequence
+        )
     }
 }

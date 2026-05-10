@@ -1,13 +1,16 @@
-# M3.3.2 Retention Policy SQE Coverage Map
+# Retention Policy SQE Coverage Map
 
-This file maps M3.3.2 retention coverage across the retention test
-suite and contract areas to public retention contracts.
-Docs/APIDesign.md owns API-observable retention guarantees.
-Docs/Requirements.md owns the `LGP-7` identifier.
+This file maps retention coverage across the retention test suite
+and contract areas to public retention semantics.
+[`Docs/APIDesign.md`](../../Docs/APIDesign.md) owns
+API-observable retention contracts.
+[`Docs/Requirements.md`](../../Docs/Requirements.md) owns the `LGP-7`
+identifier.
 
 This document is non-normative and does not define behavior.
 
-For the target-level index, see CoverageMap.md.
+For the target-level index, see
+[`CoverageMap.md`](CoverageMap.md).
 
 ## Coverage Matrix
 
