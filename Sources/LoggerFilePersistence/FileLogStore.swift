@@ -18,10 +18,6 @@ public actor FileLogStore: PersistentLogStore {
     /// 2 MiB.
     public static let maxEncodedLineBytes = 2_097_152
 
-    /// Minimum decimal width for rotated segment sequences.
-    /// Reopen discovery is width-independent.
-    private static let rotatedSegmentSequenceWidth = 6
-
     /// Module-internal so the export extension in a sibling file
     /// can resolve the configured root path without exposing
     /// configuration as public API.
@@ -385,12 +381,12 @@ public actor FileLogStore: PersistentLogStore {
         return active
     }
 
-    /// Returns the rotated-segment URL for `sequence`.
+    /// Returns the rotated-segment URL for `sequence` using the
+    /// production-owned default minimum decimal width.
     private func rotatedSegmentURL(sequence: UInt64) -> URL {
         SegmentEnumeration.rotatedSegmentURL(
             in: configuration.directory,
-            sequence: sequence,
-            minimumWidth: Self.rotatedSegmentSequenceWidth
+            sequence: sequence
         )
     }
 

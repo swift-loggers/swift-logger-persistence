@@ -4,8 +4,10 @@ This file maps `LoggerFilePersistence` contract areas to requirement IDs and
 test coverage.
 
 This document is non-normative and does not define behavior.
-Docs/FileFormatSpec.md remains the sole normative file-format contract owner.
-Docs/Requirements.md owns requirement IDs.
+[`Docs/FileFormatSpec.md`](../../Docs/FileFormatSpec.md) remains the
+sole normative file-format contract owner.
+[`Docs/Requirements.md`](../../Docs/Requirements.md) owns requirement
+IDs.
 
 ## Contract Coverage Index
 
@@ -29,11 +31,11 @@ Docs/Requirements.md owns requirement IDs.
 | Internal read error and corruption-class mapping | LGP-16, LGP-17, LGP-18, LGP-33, LGP-35, LGP-36, LGP-37 | Covered | `SegmentEnumerationLstatFailureTests.swift`, `RecoveryDiscoverySQECoverage.md`, `CorpusRecoveryTests.swift` |
 | Duplicate JSON member detection | LGP-33, LGP-34, LGP-35 | Covered | `JSONDuplicateMemberScannerTests.swift`, `CorpusRecoveryTests.swift` |
 | Recovery discovery | LGP-14, LGP-15, LGP-16, LGP-17, LGP-18, LGP-36, LGP-37 | Covered | `RecoverablePrefixScannerTests.swift`, `RecoverablePrefixScannerBoundaryTests.swift`, `CorpusRecoveryTests.swift`, `RecoveryDiscoverySQECoverage.md` |
-| Accepted-line iteration | LGP-14, LGP-15, LGP-19, LGP-27, LGP-30 | Covered | `AcceptedLineIteratorTests.swift`, `AcceptedLineIteratorMidChainPartialTests.swift`, `AcceptedLineIteratorPullStreamingTests.swift`, `AcceptedLineIteratorCancellationTests.swift`, `AcceptedLineIteratorRereadTests.swift`, `RecoverablePrefixScannerTests.swift`, `RecoveryDiscoverySQECoverage.md` |
+| Accepted-line iteration | LGP-14, LGP-15, LGP-19, LGP-27, LGP-30, LGP-31 | Covered | `AcceptedLineIteratorTests.swift`, `AcceptedLineIteratorMidChainPartialTests.swift`, `AcceptedLineIteratorPullStreamingTests.swift`, `AcceptedLineIteratorCancellationTests.swift`, `AcceptedLineIteratorRereadTests.swift`, `RecoverablePrefixScannerTests.swift`, `RecoveryDiscoverySQECoverage.md` |
 | Corpus-governed corruption classification | LGP-33, LGP-34, LGP-35, LGP-36, LGP-37 | Covered | `RecoveryDiscoverySQECoverage.md`, `Fixtures/Corpus/` |
 | Retention policy | LGP-2, LGP-7, LGP-8, LGP-9, LGP-11, LGP-25, LGP-27, LGP-32 | Covered | `FileLogStoreRetentionTests.swift`, `RetentionSelectionTests.swift`, `RetentionPolicySQECoverage.md` |
 | Destructive removal lifecycle | LGP-2, LGP-8, LGP-9, LGP-24, LGP-25, LGP-27, LGP-39 | Covered | `FileLogStoreRemoveTests.swift`, `FileLogStoreRemoveFailureTests.swift`, `FileLogStoreRemoveStaleBoundaryTests.swift`, `FileLogStoreRemoveConcurrencyTests.swift`, `RemoveLifecycleSQECoverage.md` |
-| Byte-stable export API | LGP-8, LGP-14, LGP-15, LGP-16, LGP-17, LGP-32 | Covered | `FileLogStoreExportTests.swift`, `FileLogStoreExportDestinationTests.swift`, `FileLogStoreExportRotatedTests.swift`, `ByteStableExportSQECoverage.md` |
+| Byte-stable export API | LGP-8, LGP-14, LGP-15, LGP-16, LGP-17, LGP-30, LGP-31, LGP-32 | Covered | `FileLogStoreExportTests.swift`, `FileLogStoreExportDestinationTests.swift`, `FileLogStoreExportRotatedTests.swift`, `FileLogStoreExportReplayIdentityTests.swift`, `ByteStableExportSQECoverage.md` |
 | Logical export API | LGP-32 | Future scope | Separate future API. Not part of M3.3.2. |
 
 ## Implementation File Index
@@ -49,7 +51,7 @@ remains the review entry point.
 | `EnvelopeLineClassifier.swift` | Read-side envelope validation, JSON scalar-fragment rejection, and corruption classification | `RecoverablePrefixScannerTests.swift`, `EnvelopeLineClassifierJSONFragmentTests.swift`, `CorpusRecoveryTests.swift` |
 | `ExportableLogStore.swift` | Public export/remove protocol surface | `FileLogStoreRemoveTests.swift`, `RemoveLifecycleSQECoverage.md` |
 | `FileLogStore.swift` | Append/write path, flush, rotation, reopen, trailing-suffix handling, lifecycle seams, descriptor-relative writer opens, actor-owned pending-close queue, removal-boundary actor state, active-writer reset/reopen coordination after destructive removal steps | `FileLogStoreTests.swift`, `FileLogStoreRotationTests.swift`, `FileLogStoreReopenTests.swift`, `FileLogStoreReopenDuplicateTests.swift`, `FileLogStoreWriterMidScanTOCTOUTests.swift`, `FileLogStoreWriterSymlinkTests.swift`, `FileLogStoreRemoveTests.swift`, `FileLogStoreRemoveFailureTests.swift` |
-| `FileLogStoreExport.swift` | Byte-stable export surface, atomic no-overwrite destination commit, private export temporary containment, nonreentrant export serialization, descriptor-relative segment read, removal-boundary capture | `FileLogStoreExportTests.swift`, `FileLogStoreExportDestinationTests.swift`, `FileLogStoreExportRotatedTests.swift`, `ByteStableExportSQECoverage.md`, `RemoveLifecycleSQECoverage.md` |
+| `FileLogStoreExport.swift` | Byte-stable export surface, atomic no-overwrite destination commit, private export temporary containment, nonreentrant export serialization, descriptor-relative segment read, removal-boundary capture, replay-identity preservation for unknown future `contentType` | `FileLogStoreExportTests.swift`, `FileLogStoreExportDestinationTests.swift`, `FileLogStoreExportRotatedTests.swift`, `FileLogStoreExportReplayIdentityTests.swift`, `ByteStableExportSQECoverage.md`, `RemoveLifecycleSQECoverage.md` |
 | `FileLogStoreExportError.swift` | Public export error taxonomy, destination-topology projection, public corruption-class mapping | `FileLogStoreExportTests.swift`, `FileLogStoreExportDestinationTests.swift`, `FileLogStoreExportRotatedTests.swift` |
 | `FileLogStoreExportDestinationValidation.swift` | Caller-input destination URL validation (non-file URL rejection before any path-based derivation), projecting onto `.operationFailed(.validateDestination)` | `FileLogStoreExportDestinationTests.swift` |
 | `FileLogStoreExportSegmentWrite.swift` | Per-segment export byte streaming and removal-boundary entry capture | `FileLogStoreExportTests.swift`, `FileLogStoreExportRotatedTests.swift`, `ByteStableExportSQECoverage.md`, `RemoveLifecycleSQECoverage.md` |

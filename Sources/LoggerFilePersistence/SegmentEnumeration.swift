@@ -23,12 +23,7 @@ internal enum SegmentEnumeration {
         directory.appendingPathComponent(unrotatedSegmentFileName)
     }
 
-    /// Returns the unrotated-segment URL when `log.ndjson` is
-    /// present and is a regular file. Single-call wrapper around
-    /// ``SegmentRoot``: opens the configured root as a
-    /// descriptor-relative discovery root, inspects the entry
-    /// descriptor-relatively, and releases the descriptor before
-    /// returning.
+    /// Returns `log.ndjson` when it exists as a regular file.
     static func unrotatedSegmentURLIfRegular(
         in directory: URL,
         fileManager _: FileManager
@@ -65,7 +60,25 @@ internal enum SegmentEnumeration {
         return try root.highestRotatedSegmentSequence()
     }
 
-    /// Returns the write-side rotated-segment URL for `sequence`.
+    /// Returns the write-side rotated-segment URL for `sequence`
+    /// using the package's default minimum decimal width. Single
+    /// production owner of the rotated-segment filename default
+    /// for both writers and tests.
+    static func rotatedSegmentURL(
+        in directory: URL,
+        sequence: UInt64
+    ) -> URL {
+        rotatedSegmentURL(
+            in: directory,
+            sequence: sequence,
+            minimumWidth: 6
+        )
+    }
+
+    /// Returns the write-side rotated-segment URL for `sequence`
+    /// at an explicit minimum decimal width. Reopen discovery is
+    /// width-independent; this overload exists for callers that
+    /// need to pin a specific width.
     static func rotatedSegmentURL(
         in directory: URL,
         sequence: UInt64,
@@ -127,8 +140,7 @@ internal enum SegmentEnumeration {
 
 // MARK: - SegmentRoot (descriptor-relative discovery)
 
-/// Stable directory identity captured from a filesystem
-/// metadata snapshot.
+/// Stable `(st_dev, st_ino)` identity for a configured root.
 internal struct DirectoryIdentity: Equatable, Sendable {
     // periphery:ignore - Periphery does not trace synthesized Equatable reads.
     let dev: dev_t
@@ -168,11 +180,7 @@ internal final class SegmentRoot: @unchecked Sendable {
         }
     }
 
-    /// Opens `directory` as a descriptor-relative discovery root.
-    /// Returns `nil` for an absent root (`ENOENT`); throws
-    /// `.operationFailed(.enumerateSegments)` for non-directory
-    /// (`ENOTDIR`), symlinked root (`ELOOP`), or any other open
-    /// failure.
+    /// Opens `directory` as a no-follow directory descriptor.
     static func open(
         directory: URL
     ) throws(InternalReadError) -> SegmentRoot? {
@@ -197,11 +205,7 @@ internal final class SegmentRoot: @unchecked Sendable {
         return SegmentRoot(directoryURL: directory, rootFD: descriptor)
     }
 
-    /// Asserts the held descriptor still refers to the same
-    /// directory identity captured by `expected`. Used by the writer
-    /// to bind pre-open directory validation to the held descriptor
-    /// identity so a configured-path swap between validation and
-    /// descriptor acquisition is rejected.
+    /// Validates the held descriptor against an expected root identity.
     func validateIdentity(
         matches expected: DirectoryIdentity
     ) throws(InternalReadError) {
