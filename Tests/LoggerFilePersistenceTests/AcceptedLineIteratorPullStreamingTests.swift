@@ -48,10 +48,8 @@ extension AcceptedLineIteratorPullStreamingTests {
         try Self.makeDirectory(directory)
         defer { FileLogStoreTestSupport.remove(directory) }
 
-        // Many small accepted lines so the segment spans more than
-        // one 64 KiB scanner chunk. After the first pull, the
-        // iterator's chunk-read counter must remain bounded; it
-        // must NOT have read the whole file to stage line 2.
+        // Many small lines so the segment spans multiple 64 KiB
+        // chunks; the first pull must stay bounded.
         let totalLines = 4096
         var bytes = Data()
         for sequence in 1 ... totalLines {

@@ -64,6 +64,34 @@ struct FileLogStoreRetentionTests {
         )
         return entries.map { $0.url.lastPathComponent }
     }
+
+    private static func withInstalledSeam<Handler>(
+        setter: @Sendable @escaping (Handler?) async -> Void,
+        handler: Handler,
+        body: () async throws -> Void
+    ) async throws {
+        await setter(handler)
+        var capturedError: (any Error)?
+        do {
+            try await body()
+        } catch {
+            capturedError = error
+        }
+        await setter(nil)
+        if let capturedError { throw capturedError }
+    }
+
+    private static func withRetentionUnlinkSeam(
+        on store: FileLogStore,
+        handler: @Sendable @escaping (URL) throws -> Void,
+        body: () async throws -> Void
+    ) async throws {
+        try await withInstalledSeam(
+            setter: { await store._setOnBeforeRetentionUnlinkForTesting($0) },
+            handler: handler,
+            body: body
+        )
+    }
 }
 
 // MARK: - RetentionPolicy validation
@@ -309,10 +337,7 @@ extension FileLogStoreRetentionTests {
             directory: directory,
             retention: try .maxSegments(2)
         )
-        // Four appends produce four sized rotated segments. Per
-        // `.maxSegments(2)`, after the fourth append the topology
-        // must contain the two newest (3 + active 4); the two
-        // oldest must be unlinked.
+        // Four appends → four rotated segments; `.maxSegments(2)` keeps the two newest (3 + active 4).
         for sequence: UInt64 in 1 ... 4 {
             try await store.append(
                 FileLogStoreTestSupport.makeEnvelope(sequence: sequence)
@@ -358,10 +383,8 @@ extension FileLogStoreRetentionTests {
     func bySizeMaxTotalBytesDeletesOldestUntilCapFits() async throws {
         let directory = Self.uniqueDirectory()
         defer { FileLogStoreTestSupport.remove(directory) }
-        // Cap = 2x encoded-line cap; each rotated segment in this
-        // suite holds one rotation-sized line (≈ 1.07 MB), so
-        // three segments push above the cap and the oldest is
-        // dropped on the fourth append.
+        // Cap = 2x encoded-line cap; each rotated segment holds one
+        // ~1.07 MB line, so the fourth append drops the oldest.
         let store = try Self.makeRotatingStore(
             directory: directory,
             retention: try .maxTotalBytes(FileLogStore.maxEncodedLineBytes * 2)
@@ -427,10 +450,8 @@ extension FileLogStoreRetentionTests {
             )
         }
         try await store.flush()
-        // Triggering append (sequence 4) sits in the active
-        // segment; the prior retained rotated segment carries
-        // sequence 3. Bytes match the canonical encoder
-        // byte-for-byte, proving admission survived retention.
+        // Triggering append (sequence 4) is active; sequence 3 is the
+        // retained rotated segment. Bytes match the canonical encoder.
         let segment3 = directory.appendingPathComponent("log.000003.ndjson")
         let segment4 = directory.appendingPathComponent("log.000004.ndjson")
         #expect(try Data(contentsOf: segment3) == (try Self.encodedLine(for: 3)))
@@ -547,46 +568,46 @@ extension FileLogStoreRetentionTests {
             FileLogStoreTestSupport.makeEnvelope(sequence: 1)
         )
         struct InjectedRetentionError: Error, Equatable {}
-        await store._setOnBeforeRetentionUnlinkForTesting { _ in
-            throw InjectedRetentionError()
-        }
-        // Second append admits sequence 2, rotates to a new
-        // segment, then retention attempts to unlink segment 1 —
-        // the seam fails. Admission must remain in effect; the
-        // caller observes `.operationFailed(.enforceRetention)`.
-        do {
-            // `makeEnvelope` is untyped-throws and `append` is
-            // typed-throws on `FileLogStoreError`; the union is
-            // `any Error` so the catch needs an explicit cast to
-            // pattern-match the typed enum.
-            try await store.append(
-                FileLogStoreTestSupport.makeEnvelope(sequence: 2)
-            )
-            Issue.record("expected .operationFailed(.enforceRetention)")
-        } catch let error as FileLogStoreError {
-            switch error {
-            case let .operationFailed(operation, url, _):
-                #expect(operation == .enforceRetention)
-                #expect(url.lastPathComponent == "log.000001.ndjson")
-            default:
-                Issue.record("unexpected append error: \(error)")
+        // Second append admits, rotates, then retention's seam fails;
+        // admission survives and caller sees `.operationFailed(.enforceRetention)`.
+        try await Self.withRetentionUnlinkSeam(
+            on: store,
+            handler: { _ in throw InjectedRetentionError() },
+            body: {
+                do {
+                    // `makeEnvelope` is untyped-throws and `append` is
+                    // typed-throws on `FileLogStoreError`; the union is
+                    // `any Error` so the catch needs an explicit cast to
+                    // pattern-match the typed enum.
+                    try await store.append(
+                        FileLogStoreTestSupport.makeEnvelope(sequence: 2)
+                    )
+                    Issue.record("expected .operationFailed(.enforceRetention)")
+                } catch let error as FileLogStoreError {
+                    switch error {
+                    case let .operationFailed(operation, url, _):
+                        #expect(operation == .enforceRetention)
+                        #expect(url.lastPathComponent == "log.000001.ndjson")
+                    default:
+                        Issue.record("unexpected append error: \(error)")
+                    }
+                } catch {
+                    Issue.record("unexpected non-FileLogStoreError: \(error)")
+                }
             }
-        } catch {
-            Issue.record("unexpected non-FileLogStoreError: \(error)")
-        }
+        )
         // Topology is recoverable: the segment that retention
         // tried (and failed) to unlink remains; the admitted line
         // sits in the new active segment.
         let segment1 = directory.appendingPathComponent("log.000001.ndjson")
         let segment2 = directory.appendingPathComponent("log.000002.ndjson")
         #expect(FileManager.default.fileExists(atPath: segment1.path))
+        #expect(try Data(contentsOf: segment1) == (try Self.encodedLine(for: 1)))
         let bytes2 = try Data(contentsOf: segment2)
         #expect(bytes2 == (try Self.encodedLine(for: 2)))
 
-        // Disable the seam; a follow-up append succeeds and proves
-        // later operations operate on the recoverable topology
-        // left by the failed pass.
-        await store._setOnBeforeRetentionUnlinkForTesting(nil)
+        // Follow-up append succeeds and proves later operations operate
+        // on the recoverable topology left by the failed pass.
         try await store.append(
             FileLogStoreTestSupport.makeEnvelope(sequence: 3)
         )
@@ -630,42 +651,49 @@ extension FileLogStoreRetentionTests {
             FileLogStoreTestSupport.makeEnvelope(sequence: 1)
         )
 
-        // Seam runs after retention selects segment 1 and before
-        // the destructive unlink: replace the regular file with a
-        // symlink pointing outside the store. Post-seam
-        // revalidation must reject the now-non-regular candidate.
-        await store._setOnBeforeRetentionUnlinkForTesting { candidateURL in
-            try FileManager.default.removeItem(at: candidateURL)
-            try FileManager.default.createSymbolicLink(
-                at: candidateURL, withDestinationURL: symlinkTarget
-            )
-        }
-
-        do {
-            try await store.append(
-                FileLogStoreTestSupport.makeEnvelope(sequence: 2)
-            )
-            Issue.record("expected .operationFailed(.enforceRetention) for symlink swap")
-        } catch let error as FileLogStoreError {
-            switch error {
-            case let .operationFailed(operation, url, _):
-                #expect(operation == .enforceRetention)
-                #expect(url.lastPathComponent == "log.000001.ndjson")
-            default:
-                Issue.record("unexpected append error: \(error)")
+        // Replace segment 1 with an out-of-store symlink between selection
+        // and unlink; post-seam revalidation must reject the now-non-regular candidate.
+        try await Self.withRetentionUnlinkSeam(
+            on: store,
+            handler: { candidateURL in
+                try FileManager.default.removeItem(at: candidateURL)
+                try FileManager.default.createSymbolicLink(
+                    at: candidateURL, withDestinationURL: symlinkTarget
+                )
+            },
+            body: {
+                do {
+                    try await store.append(
+                        FileLogStoreTestSupport.makeEnvelope(sequence: 2)
+                    )
+                    Issue.record("expected .operationFailed(.enforceRetention) for symlink swap")
+                } catch let error as FileLogStoreError {
+                    switch error {
+                    case let .operationFailed(operation, url, _):
+                        #expect(operation == .enforceRetention)
+                        #expect(url.lastPathComponent == "log.000001.ndjson")
+                    default:
+                        Issue.record("unexpected append error: \(error)")
+                    }
+                } catch {
+                    Issue.record("unexpected non-FileLogStoreError: \(error)")
+                }
             }
-        } catch {
-            Issue.record("unexpected non-FileLogStoreError: \(error)")
-        }
+        )
 
         // Triggering append (sequence 2) is admitted in the new
         // active segment.
         let segment2 = directory.appendingPathComponent("log.000002.ndjson")
+        #expect(FileManager.default.fileExists(atPath: segment2.path))
         #expect(try Data(contentsOf: segment2) == (try Self.encodedLine(for: 2)))
 
         // Planted symlink stays in place — retention failed
         // closed without mutating the replacement entry.
         let symlinkURL = directory.appendingPathComponent("log.000001.ndjson")
+        #expect(
+            try FileManager.default.attributesOfItem(atPath: symlinkURL.path)[.type]
+                as? FileAttributeType == .typeSymbolicLink
+        )
         let resolved = try FileManager.default.destinationOfSymbolicLink(
             atPath: symlinkURL.path
         )
@@ -693,48 +721,50 @@ extension FileLogStoreRetentionTests {
             FileLogStoreTestSupport.makeEnvelope(sequence: 1)
         )
 
-        // Sentinel byte the test plants inside the directory
-        // replacement so a misbehaving retention pass that
-        // accidentally walked into the directory would leave a
-        // detectable trace.
+        // Sentinel byte planted inside the directory replacement; a misbehaving retention pass would leave a detectable trace.
         let directoryReplacementSentinelByte: UInt8 = 0xA5
 
         // Seam: replace the regular candidate with a directory
         // (a non-regular entry of a different kind than the
         // symlink test). Post-seam revalidation must reject.
-        await store._setOnBeforeRetentionUnlinkForTesting { candidateURL in
-            try FileManager.default.removeItem(at: candidateURL)
-            try FileManager.default.createDirectory(
-                at: candidateURL, withIntermediateDirectories: false
-            )
-            // Plant a sentinel inside so the assertion below can
-            // prove the directory-replacement entry survived.
-            let sentinel = candidateURL.appendingPathComponent("sentinel.bin")
-            try Data([directoryReplacementSentinelByte]).write(to: sentinel)
-        }
-
-        do {
-            try await store.append(
-                FileLogStoreTestSupport.makeEnvelope(sequence: 2)
-            )
-            Issue.record(
-                "expected .operationFailed(.enforceRetention) for directory swap"
-            )
-        } catch let error as FileLogStoreError {
-            switch error {
-            case let .operationFailed(operation, url, _):
-                #expect(operation == .enforceRetention)
-                #expect(url.lastPathComponent == "log.000001.ndjson")
-            default:
-                Issue.record("unexpected append error: \(error)")
+        try await Self.withRetentionUnlinkSeam(
+            on: store,
+            handler: { candidateURL in
+                try FileManager.default.removeItem(at: candidateURL)
+                try FileManager.default.createDirectory(
+                    at: candidateURL, withIntermediateDirectories: false
+                )
+                // Plant a sentinel inside so the assertion below can
+                // prove the directory-replacement entry survived.
+                let sentinel = candidateURL.appendingPathComponent("sentinel.bin")
+                try Data([directoryReplacementSentinelByte]).write(to: sentinel)
+            },
+            body: {
+                do {
+                    try await store.append(
+                        FileLogStoreTestSupport.makeEnvelope(sequence: 2)
+                    )
+                    Issue.record(
+                        "expected .operationFailed(.enforceRetention) for directory swap"
+                    )
+                } catch let error as FileLogStoreError {
+                    switch error {
+                    case let .operationFailed(operation, url, _):
+                        #expect(operation == .enforceRetention)
+                        #expect(url.lastPathComponent == "log.000001.ndjson")
+                    default:
+                        Issue.record("unexpected append error: \(error)")
+                    }
+                } catch {
+                    Issue.record("unexpected non-FileLogStoreError: \(error)")
+                }
             }
-        } catch {
-            Issue.record("unexpected non-FileLogStoreError: \(error)")
-        }
+        )
 
         // Triggering append (sequence 2) is admitted in the new
         // active segment.
         let segment2 = directory.appendingPathComponent("log.000002.ndjson")
+        #expect(FileManager.default.fileExists(atPath: segment2.path))
         #expect(try Data(contentsOf: segment2) == (try Self.encodedLine(for: 2)))
 
         // Planted directory replacement stays in place with its
@@ -781,10 +811,7 @@ extension FileLogStoreRetentionTests {
             FileLogStoreTestSupport.makeEnvelope(sequence: 1)
         )
 
-        // Swap the configured-path target: rename the original
-        // directory aside, then create a fresh empty directory at
-        // the same path. The held writer root still binds to the
-        // original (renamed) inode.
+        // Rename the original directory aside; the held writer root still binds to the original inode.
         let renamedAside = Self.uniqueDirectory()
         defer { FileLogStoreTestSupport.remove(renamedAside) }
         try FileManager.default.moveItem(
@@ -792,10 +819,8 @@ extension FileLogStoreRetentionTests {
         )
         try Self.makeDirectory(originalDirectory)
 
-        // Second append writes through the held descriptor into
-        // the renamed-aside directory and triggers retention to
-        // delete segment 1 there. The newly created
-        // configured-path directory must remain empty.
+        // Second append writes via held descriptor into the renamed-aside
+        // directory; the new configured-path directory must remain empty.
         try await store.append(
             FileLogStoreTestSupport.makeEnvelope(sequence: 2)
         )

@@ -1,4 +1,4 @@
-// swiftlint:disable file_length - Byte-stable export coverage centralizes destination-topology, atomicity, single-flight, byte-equality, and private-temp-directory confidentiality proofs in one suite for review locality.
+// swiftlint:disable file_length - LOCKED byte-stable export SQE matrix kept in one suite for traceability.
 import Darwin
 import Foundation
 import LoggerPersistence
@@ -153,12 +153,7 @@ extension FileLogStoreExportTests {
         defer { FileLogStoreTestSupport.remove(destinationParent) }
         let destination = destinationParent.appendingPathComponent("export.ndjson")
 
-        // Plant a regular file at the final URL between final
-        // pre-check and the atomic commit. Export is executing
-        // while holding the nonreentrant operation boundary, and
-        // the seam runs synchronously before the atomic commit,
-        // so this is the deterministic window where the race can
-        // be exercised.
+        // Plant a regular file at the final URL before atomic commit.
         let plantedBytes = Data("PLANTED\n".utf8)
         let plantedPath = destination.path
         await store._setOnBeforeCommitForTesting {
@@ -453,22 +448,9 @@ extension FileLogStoreExportTests {
         let (destination, destinationParent) = try Self.makeUniqueDestination()
         defer { FileLogStoreTestSupport.remove(destinationParent) }
 
-        // Two async rendezvous instances drive the test:
-        // - `exportRendezvous` pauses the export critical section
-        //   inside the post-write seam and releases it on the
-        //   test's command. The seam awaits on a continuation —
-        //   no cooperative-pool thread is blocked.
-        // - `appendStarted` proves the append task body has
-        //   begun executing before the test signals release, so
-        //   the proof exercises concurrent-against-export rather
-        //   than sequential after-release scheduling.
-        //
-        // The strict equality check on the recorded event order
-        // is the single-flight proof: append's body interval
-        // (`append-entered` … `append-completed`) must sit
-        // entirely after `export-released` because the operation
-        // boundary holds across export's await suspensions and
-        // queues the append call behind export.
+        // `exportRendezvous` pauses export inside the operation boundary.
+        // `appendStarted` proves the append task is contending before release.
+        // Event ordering proves append completes only after export releases.
         let exportRendezvous = TestRendezvous()
         let appendStarted = TestRendezvous()
         let recorder = ActorActivityRecorder()
@@ -476,12 +458,7 @@ extension FileLogStoreExportTests {
             on: store, rendezvous: exportRendezvous, recorder: recorder
         )
 
-        // Failure-path cleanup: any throw between starting the
-        // first task and successfully draining both must release
-        // the rendezvous, cancel every started task, and
-        // bounded-drain task results so the test never leaves a
-        // paused holder behind or a queued waiter blocked on a
-        // non-cancelable operation boundary.
+        // Ensure failure paths do not leave paused operation-boundary holders behind.
         var exportTask: Task<Void, any Error>?
         var appendTask: Task<Void, any Error>?
         do {
@@ -547,9 +524,6 @@ extension FileLogStoreExportTests {
 // MARK: - Private temp directory confidentiality
 
 extension FileLogStoreExportTests {
-    // swiftlint:disable function_body_length
-    // Reason: Pre-commit topology proof, sentinel-based umask-filtered final-mode comparison, and post-commit cleanup all live in one body to keep the private-temp-dir contract locally auditable.
-
     @Test(
         "Export confines payload bytes to a private temp directory; no readable temp file in destination parent",
         .tags(.lgp8, .lgp24, .lgp25, .lgp32)
@@ -566,10 +540,7 @@ extension FileLogStoreExportTests {
         let (destination, destinationParent) = try Self.makeUniqueDestination()
         defer { FileLogStoreTestSupport.remove(destinationParent) }
 
-        // Observe destination-parent topology during the
-        // pre-commit window: payload bytes must be inside the
-        // private temp directory, not as a readable regular
-        // temp file in the parent.
+        // Observe destination-parent topology in the pre-commit window.
         let observer = PrivateTempDirObserver()
         let parentPath = destinationParent.path
         await store._setOnBeforeCommitForTesting {
@@ -603,34 +574,16 @@ extension FileLogStoreExportTests {
         }
         #expect(leftoverTempDirs.isEmpty)
 
-        // Final destination mode matches what the platform
-        // umask filters from `0o666`. Compute the expected mode
-        // by creating a sentinel file with the same `0o666` arg
-        // and reading its applied mode — avoids any
-        // `Darwin.umask(0)` lookup in the test path.
-        let sentinelURL = destinationParent
-            .appendingPathComponent("__umask-sentinel__")
-        let sentinelFD = sentinelURL.path.withCString { cPath in
-            Darwin.open(cPath, O_WRONLY | O_CREAT | O_TRUNC, 0o666)
-        }
-        try #require(sentinelFD >= 0)
-        var sentinelStat = stat()
-        let sentinelStatResult = Darwin.fstat(sentinelFD, &sentinelStat)
-        _ = Darwin.close(sentinelFD)
-        try? FileManager.default.removeItem(at: sentinelURL)
-        try #require(sentinelStatResult == 0)
-        let expectedMode = mode_t(sentinelStat.st_mode & 0o777)
-
+        // Final export is owner-only; rename preserves the temp payload mode.
         var finalStat = stat()
         let finalStatResult = destination.path.withCString { cPath in
             Darwin.lstat(cPath, &finalStat)
         }
         try #require(finalStatResult == 0)
         let actualMode = mode_t(finalStat.st_mode & 0o777)
-        #expect(actualMode == expectedMode)
+        #expect(actualMode == 0o600)
+        #expect(actualMode & 0o077 == 0)
     }
-
-    // swiftlint:enable function_body_length
 
     @Test(
         "Export failure before commit removes private temp directory and payload",

@@ -49,6 +49,51 @@ struct FileLogStoreRemoveTests {
         try await store.append(envelope)
         return try CanonicalEnvelopeLineEncoder().encode(envelope)
     }
+
+    private static func castRemoveError(
+        _ error: any Error
+    ) -> FileLogStoreRemoveError? {
+        guard let removeError = error as? FileLogStoreRemoveError else {
+            Issue.record(
+                "expected FileLogStoreRemoveError, got \(type(of: error)): \(error)"
+            )
+            return nil
+        }
+        return removeError
+    }
+
+    private static func expectNoRemovalBoundary(
+        when body: () async throws -> Void
+    ) async {
+        do {
+            try await body()
+            Issue.record("expected .noExportedRemovalBoundary")
+        } catch {
+            guard let removeError = Self.castRemoveError(error) else { return }
+            switch removeError {
+            case .noExportedRemovalBoundary:
+                break
+            default:
+                Issue.record("expected .noExportedRemovalBoundary, got \(removeError)")
+            }
+        }
+    }
+
+    private static func withInstalledSeam<Handler>(
+        setter: @Sendable @escaping (Handler?) async -> Void,
+        handler: Handler,
+        body: () async throws -> Void
+    ) async throws {
+        await setter(handler)
+        var capturedError: (any Error)?
+        do {
+            try await body()
+        } catch {
+            capturedError = error
+        }
+        await setter(nil)
+        if let capturedError { throw capturedError }
+    }
 }
 
 // MARK: - Boundary precondition
@@ -68,34 +113,41 @@ extension FileLogStoreRemoveTests {
         _ = try await Self.appendCanonicalLine(store: store, sequence: 1)
         try await store.flush()
 
-        // Force the export to fail just before its atomic
-        // commit; boundary capture must run only on the success
-        // path.
-        await store._setOnAfterWritingTemporaryBytesForTesting {
-            throw SentinelError()
-        }
-
         let (exportURL, exportParent) = try Self.makeUniqueDestination()
         defer { FileLogStoreTestSupport.remove(exportParent) }
-        do {
-            try await store.exportLogs(to: exportURL)
-            Issue.record("expected exportLogs(to:) to throw on forced failure")
-        } catch {
-            // Forced export failure — exact projection is owned by export tests.
-            _ = error
-        }
-        await store._setOnAfterWritingTemporaryBytesForTesting(nil)
 
-        do {
-            try await store.removeExportedLogs()
-            Issue.record("expected .noExportedRemovalBoundary after failed export")
-        } catch {
-            switch error {
-            case .noExportedRemovalBoundary:
-                break
-            default:
-                Issue.record("expected .noExportedRemovalBoundary, got \(error)")
+        // Force export to fail just before its atomic commit; boundary
+        // capture must run only on the success path.
+        let throwSeam: @Sendable () async throws -> Void = { throw SentinelError() }
+        try await Self.withInstalledSeam(
+            setter: { await store._setOnAfterWritingTemporaryBytesForTesting($0) },
+            handler: throwSeam,
+            body: {
+                do {
+                    try await store.exportLogs(to: exportURL)
+                    Issue.record("expected exportLogs(to:) to throw on forced failure")
+                } catch let error as FileLogStoreExportError {
+                    if case let .operationFailed(operation, _, _) = error {
+                        #expect(operation == .writeTemporaryDestinationBytes)
+                    } else {
+                        Issue.record(
+                            "expected .operationFailed(.writeTemporaryDestinationBytes), got \(error)"
+                        )
+                    }
+                } catch {
+                    Issue.record(
+                        "expected FileLogStoreExportError, got \(type(of: error)): \(error)"
+                    )
+                }
             }
+        )
+
+        // Forced failure ran before atomic commit; final destination
+        // must not exist (export did not commit).
+        #expect(!FileManager.default.fileExists(atPath: exportURL.path))
+
+        await Self.expectNoRemovalBoundary {
+            try await store.removeExportedLogs()
         }
     }
 
@@ -109,16 +161,8 @@ extension FileLogStoreRemoveTests {
         defer { FileLogStoreTestSupport.remove(directory) }
         let store = Self.makeStore(directory: directory, rotation: .never)
 
-        do {
+        await Self.expectNoRemovalBoundary {
             try await store.removeExportedLogs()
-            Issue.record("expected .noExportedRemovalBoundary")
-        } catch {
-            switch error {
-            case .noExportedRemovalBoundary:
-                break
-            default:
-                Issue.record("expected .noExportedRemovalBoundary, got \(error)")
-            }
         }
 
         // No filesystem mutation has been performed by the rejected
@@ -150,11 +194,8 @@ extension FileLogStoreRemoveTests {
         defer { FileLogStoreTestSupport.remove(exportParent) }
         try await store.exportLogs(to: exportURL)
 
-        // No post-export append. The removal boundary covers the
-        // active segment's full recoverable prefix. Active
-        // `.never` segment must be reset, not unlinked, so
-        // subsequent appends continue after the preserved
-        // removal boundary.
+        // No post-export append; active `.never` segment must be reset
+        // (not unlinked) so subsequent appends continue after the boundary.
         try await store.removeExportedLogs()
 
         let segmentURL = directory.appendingPathComponent("log.ndjson")
@@ -196,28 +237,36 @@ extension FileLogStoreRemoveTests {
         defer { FileLogStoreTestSupport.remove(exportParent) }
         try await store.exportLogs(to: exportURL)
 
-        // Out-of-band: append post-boundary bytes to the
-        // first rotated segment while preserving file identity.
-        // File identity stays the same, so identity validation
-        // passes and the compaction path triggers.
+        // Append post-boundary bytes to seg1 preserving identity so compaction runs.
         let seg1URL = FileLogStoreTestSupport.rotatedSegmentURL(
             in: directory, sequence: 1
         )
+        #expect(FileManager.default.fileExists(atPath: seg1URL.path))
         let suffixBytes = Data("POST-BOUNDARY-SUFFIX-PAYLOAD\n".utf8)
         let oobHandle = try FileHandle(forWritingTo: seg1URL)
+        defer { try? oobHandle.close() }
         try oobHandle.seekToEnd()
         try oobHandle.write(contentsOf: suffixBytes)
-        try oobHandle.close()
+
+        let seg2URL = FileLogStoreTestSupport.rotatedSegmentURL(
+            in: directory, sequence: 2
+        )
+        let seg3URL = FileLogStoreTestSupport.rotatedSegmentURL(
+            in: directory, sequence: 3
+        )
 
         try await store.removeExportedLogs()
 
-        // The compacted segment must contain exactly the
-        // post-boundary suffix.
-        // The exported prefix is gone; the post-boundary bytes
-        // survived byte-for-byte.
+        // Compacted segment contains exactly the post-boundary suffix; exported prefix is gone.
         #expect(FileManager.default.fileExists(atPath: seg1URL.path))
         let seg1Bytes = try Data(contentsOf: seg1URL)
         #expect(seg1Bytes == suffixBytes)
+
+        // seg2 was fully exported and not active → unlinked.
+        #expect(!FileManager.default.fileExists(atPath: seg2URL.path))
+        // seg3 was the active writer at export time → reset to empty.
+        #expect(FileManager.default.fileExists(atPath: seg3URL.path))
+        #expect(try Data(contentsOf: seg3URL).isEmpty)
     }
 
     @Test(
@@ -233,10 +282,7 @@ extension FileLogStoreRemoveTests {
         )
         let store = Self.makeStore(directory: directory, rotation: policy)
 
-        // This rotation fixture produces one accepted line per
-        // rotated segment. Three appends yield log.000001,
-        // log.000002, log.000003 with log.000003 the active
-        // writer.
+        // One line per rotated segment; three appends → log.000001, log.000002, log.000003 (active).
         for sequence in 1 ... 3 {
             let envelope = try FileLogStoreTestSupport.makeEnvelope(
                 sequence: UInt64(sequence)
@@ -244,12 +290,6 @@ extension FileLogStoreRemoveTests {
             try await store.append(envelope)
         }
         try await store.flush()
-
-        let (exportURL, exportParent) = try Self.makeUniqueDestination()
-        defer { FileLogStoreTestSupport.remove(exportParent) }
-        try await store.exportLogs(to: exportURL)
-
-        try await store.removeExportedLogs()
 
         let seg1 = FileLogStoreTestSupport.rotatedSegmentURL(
             in: directory, sequence: 1
@@ -260,6 +300,15 @@ extension FileLogStoreRemoveTests {
         let seg3 = FileLogStoreTestSupport.rotatedSegmentURL(
             in: directory, sequence: 3
         )
+        #expect(FileManager.default.fileExists(atPath: seg1.path))
+        #expect(FileManager.default.fileExists(atPath: seg2.path))
+        #expect(FileManager.default.fileExists(atPath: seg3.path))
+
+        let (exportURL, exportParent) = try Self.makeUniqueDestination()
+        defer { FileLogStoreTestSupport.remove(exportParent) }
+        try await store.exportLogs(to: exportURL)
+
+        try await store.removeExportedLogs()
         // log.000001 and log.000002 were rotated and not active;
         // remove must unlink them.
         #expect(!FileManager.default.fileExists(atPath: seg1.path))
@@ -293,10 +342,7 @@ extension FileLogStoreRemoveTests {
         defer { FileLogStoreTestSupport.remove(exportParent) }
         try await store.exportLogs(to: exportURL)
 
-        // Plant a real, closable handle directly into the
-        // pending-close queue. Removal must drain this on entry,
-        // matching the discipline already exercised by `append`,
-        // `flush`, and `exportLogs(to:)`.
+        // Plant a closable handle in the pending-close queue; removal must drain it on entry.
         let pendingURL = directory.appendingPathComponent("pending.bin")
         try Data().write(to: pendingURL)
         let pendingHandle = try FileHandle(forReadingFrom: pendingURL)
@@ -308,13 +354,18 @@ extension FileLogStoreRemoveTests {
 
         let afterCount = await store._pendingCloseHandleCountForTesting
         #expect(afterCount == 0)
+
+        // Boundary's main effect ran: the active `.never` segment
+        // (which was fully exported) is reset to empty.
+        let segmentURL = directory.appendingPathComponent("log.ndjson")
+        #expect(try Data(contentsOf: segmentURL).isEmpty)
     }
 
     @Test(
-        "Compaction preserves the boundary segment's permission bits across atomic replacement",
+        "Compaction preserves owner-class permission bits and drops group/world bits",
         .tags(.lgp9, .lgp27)
     )
-    func compactionPreservesSegmentPermissionBits() async throws {
+    func compactionPreservesOwnerClassAndDropsGroupWorldBits() async throws {
         let directory = Self.uniqueDirectory()
         try Self.makeDirectory(directory)
         defer { FileLogStoreTestSupport.remove(directory) }
@@ -328,14 +379,17 @@ extension FileLogStoreRemoveTests {
         defer { FileLogStoreTestSupport.remove(exportParent) }
         try await store.exportLogs(to: exportURL)
 
-        // Out-of-band: restrict the segment to `0o640` so the
-        // compaction temp carrying default `0o666` would change
-        // the on-disk permission bits after `renameat` if
-        // permission-bit preservation were missing.
+        // Widen segment to 0o644; compaction must keep owner-class
+        // bits (→ 0o600) and drop group/world bits at replacement.
         let segmentURL = directory.appendingPathComponent("log.ndjson")
-        let restrictedPermissions: mode_t = 0o640
+        let widenedPermissions: mode_t = 0o644
         let chmodResult = segmentURL.path.withCString { cPath in
-            Darwin.chmod(cPath, restrictedPermissions)
+            Darwin.chmod(cPath, widenedPermissions)
+        }
+        if chmodResult != 0 {
+            Issue.record(
+                "chmod(\(segmentURL.path), \(String(widenedPermissions, radix: 8))) failed with errno \(errno)"
+            )
         }
         try #require(chmodResult == 0)
 
@@ -352,16 +406,20 @@ extension FileLogStoreRemoveTests {
         let onDisk = try Data(contentsOf: segmentURL)
         #expect(onDisk == line2)
 
-        // Compacted segment's permission bits match the
-        // pre-compaction boundary segment, not the active umask
-        // at compaction time.
+        // Compacted segment is owner-class only (0o600); group/world bits dropped.
         var statBuf = stat()
         let lstatResult = segmentURL.path.withCString { cPath in
             Darwin.lstat(cPath, &statBuf)
         }
+        if lstatResult != 0 {
+            Issue.record(
+                "lstat(\(segmentURL.path)) failed with errno \(errno)"
+            )
+        }
         try #require(lstatResult == 0)
         let onDiskPermissions = mode_t(statBuf.st_mode & 0o777)
-        #expect(onDiskPermissions == restrictedPermissions)
+        #expect(onDiskPermissions == 0o600)
+        #expect(onDiskPermissions & 0o077 == 0)
     }
 
     @Test(
@@ -406,10 +464,7 @@ extension FileLogStoreRemoveTests {
         let afterRemove = try Data(contentsOf: segmentURL)
         #expect(afterRemove == line2)
 
-        // A subsequent byte-stable export must observe only the
-        // post-boundary bytes, confirming the segment was
-        // compacted (not truncated to `exportedPrefixEnd`, which
-        // would have left only `line1`).
+        // A subsequent export must observe only post-boundary bytes — proves compaction, not truncation.
         let (reExportURL, reExportParent) = try Self.makeUniqueDestination()
         defer { FileLogStoreTestSupport.remove(reExportParent) }
         try await store.exportLogs(to: reExportURL)

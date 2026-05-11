@@ -48,7 +48,7 @@ internal enum RecoverablePrefixScanner {
                         context: FileSystemErrorContext(
                             domain: FileSystemErrorContext.packageDomain,
                             code: nil,
-                            description: "lineOffsetOverflow"
+                            description: "line offset overflow"
                         )
                     )
                 }
@@ -158,7 +158,7 @@ extension RecoverablePrefixScanner {
                     context: FileSystemErrorContext(
                         domain: FileSystemErrorContext.packageDomain,
                         code: nil,
-                        description: "lineOffsetOverflow"
+                        description: "line offset overflow"
                     )
                 )
             }

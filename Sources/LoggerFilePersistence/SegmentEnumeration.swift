@@ -1,3 +1,4 @@
+// swiftlint:disable file_length - Filename parsing, descriptor-relative discovery, segment open create-or-reopen with permission preservation, and duplicate-rotated-segment tracking are kept in one file so the segment-topology contract stays auditable in one place.
 import Darwin
 import Foundation
 
@@ -166,18 +167,13 @@ internal final class SegmentRoot: @unchecked Sendable {
     }
 
     deinit {
-        if rootFD >= 0 {
-            _ = Darwin.close(rootFD)
-        }
+        closeDescriptorIgnoringResultOnce(&rootFD)
     }
 
     /// Releases the root file descriptor. Subsequent discovery or
     /// segment-open calls on this instance are invalid.
     func close() {
-        if rootFD >= 0 {
-            _ = Darwin.close(rootFD)
-            rootFD = -1
-        }
+        closeDescriptorIgnoringResultOnce(&rootFD)
     }
 
     /// Opens `directory` as a no-follow directory descriptor.
@@ -317,23 +313,37 @@ internal final class SegmentRoot: @unchecked Sendable {
             url: url,
             flags: O_RDONLY | O_NOFOLLOW | O_CLOEXEC,
             mode: 0,
-            failureDescription: "openat(O_RDONLY|O_NOFOLLOW) failed"
+            failureDescription: "segment read open failed"
         )
         return try validateRegularFileFD(descriptor, url: url)
     }
 
     /// Opens or creates a writable segment without following symlinks
     /// and validates the descriptor as a regular file.
+    ///
+    /// Newly-created segment files are owner-only (`0o600`) so accepted
+    /// bytes are private by default; the mode is enforced
+    /// descriptor-relative via an explicit `fchmod` permission-preservation
+    /// step after the create `openat`, so a process umask that would mask
+    /// owner bits cannot weaken the on-disk mode below `0o600`. A
+    /// pre-existing segment file is reused without permission change.
     func openSegmentForWriting(
         url: URL
     ) throws(InternalReadError) -> FileHandle {
-        let descriptor = try openatRelative(
+        if let createDescriptor = try createSegmentForWritingDescriptorRelative(
+            rootFD: rootFD, url: url
+        ) {
+            return try validateRegularFileFD(createDescriptor, url: url)
+        }
+        // Pre-existing segment: reopen without create / chmod to preserve
+        // existing permissions.
+        let reopenDescriptor = try openatRelative(
             url: url,
-            flags: O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC,
-            mode: 0o666,
-            failureDescription: "openat(O_RDWR|O_CREAT|O_NOFOLLOW) failed"
+            flags: O_RDWR | O_NOFOLLOW | O_CLOEXEC,
+            mode: 0,
+            failureDescription: "segment write open failed"
         )
-        return try validateRegularFileFD(descriptor, url: url)
+        return try validateRegularFileFD(reopenDescriptor, url: url)
     }
 
     /// Resolves `url`'s last path component against `rootFD` and
@@ -363,12 +373,8 @@ internal final class SegmentRoot: @unchecked Sendable {
         return descriptor
     }
 
-    /// Streams directory entry names through `body` via a fresh
-    /// directory stream opened with `openat(rootFD, ".", ...)` —
-    /// see `openDirHandle` for why this avoids the
-    /// shared-cursor bug that a `dup`-based open would
-    /// reintroduce. Skips `.` and `..`; `body` is invoked once per
-    /// remaining entry and may throw to abort the scan.
+    /// Streams directory entry names from an independent root-relative
+    /// directory stream.
     private func forEachEntryName(
         _ body: (String) throws(InternalReadError) -> Void
     ) throws(InternalReadError) {
@@ -388,7 +394,7 @@ internal final class SegmentRoot: @unchecked Sendable {
                         context: FileSystemErrorContext(
                             domain: NSPOSIXErrorDomain,
                             code: Int(savedErrno),
-                            description: "readdir failed"
+                            description: "directory entry read failed"
                         )
                     )
                 }
@@ -401,16 +407,9 @@ internal final class SegmentRoot: @unchecked Sendable {
         }
     }
 
-    /// Opens a fresh `DIR *` over the held root via
-    /// `openat(rootFD, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC)` +
-    /// `fdopendir`. Using `openat(".")` instead of `dup(rootFD)`
-    /// gives the directory stream its own open-file description so
-    /// `readdir` cursor advancement does not bleed back into
-    /// `rootFD` (a `dup`'d descriptor would share the cursor and a
-    /// later enumeration would resume at end-of-stream and report
-    /// zero entries).
+    /// Opens an independent directory stream over the held root.
     private func openDirHandle() throws(InternalReadError) -> UnsafeMutablePointer<DIR> {
-        let dirFD = ".".withCString { cDot in
+        var dirFD = ".".withCString { cDot in
             Darwin.openat(rootFD, cDot, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
         }
         if dirFD < 0 {
@@ -421,7 +420,7 @@ internal final class SegmentRoot: @unchecked Sendable {
                 context: FileSystemErrorContext(
                     domain: NSPOSIXErrorDomain,
                     code: Int(savedErrno),
-                    description: "openat(rootFD, \".\", O_RDONLY|O_DIRECTORY|O_CLOEXEC) failed"
+                    description: "directory stream open failed"
                 )
             )
         }
@@ -429,25 +428,24 @@ internal final class SegmentRoot: @unchecked Sendable {
             let savedErrno = errno
             // Best-effort cleanup before throwing; close failure
             // does not change the projected enumerate-segments error.
-            _ = Darwin.close(dirFD)
+            // On `fdopendir` success the descriptor's ownership passes
+            // to the returned `DIR*`, so this branch is the only one
+            // that may close `dirFD`.
+            closeDescriptorIgnoringResultOnce(&dirFD)
             throw .operationFailed(
                 operation: .enumerateSegments,
                 url: directoryURL,
                 context: FileSystemErrorContext(
                     domain: NSPOSIXErrorDomain,
                     code: Int(savedErrno),
-                    description: "fdopendir failed"
+                    description: "directory stream attach failed"
                 )
             )
         }
         return dirHandle
     }
 
-    /// Materializes the directory listing for callers that need
-    /// random access — currently only the deterministic-order
-    /// candidate sort in ``enumerateRotatedSegments()``. The
-    /// streaming-only ``highestRotatedSegmentSequence()`` does not
-    /// go through this path.
+    /// Materializes entry names for deterministic sorted enumeration.
     private func collectEntryNames() throws(InternalReadError) -> [String] {
         var names: [String] = []
         try forEachEntryName { name in
@@ -456,9 +454,7 @@ internal final class SegmentRoot: @unchecked Sendable {
         return names
     }
 
-    /// Returns whether the named entry under `rootFD` is a regular
-    /// file. `nil` reports a vanished entry (`ENOENT`, e.g. race
-    /// between listing and inspection).
+    /// Returns regular-file status for a root-relative entry.
     private func isRegularFile(name: String) throws(InternalReadError) -> Bool? {
         var statBuf = stat()
         let result = name.withCString { cName in
@@ -473,7 +469,7 @@ internal final class SegmentRoot: @unchecked Sendable {
                 context: FileSystemErrorContext(
                     domain: NSPOSIXErrorDomain,
                     code: Int(savedErrno),
-                    description: "fstatatFailed"
+                    description: "entry metadata read failed"
                 )
             )
         }
@@ -499,11 +495,78 @@ internal final class SegmentRoot: @unchecked Sendable {
 
 // MARK: - File-scope SegmentRoot helpers
 
-/// Confirms `descriptor` refers to a regular file via `fstat` and
-/// wraps it in an owning `FileHandle`. Closes the descriptor on
-/// any rejection so the caller never leaks an FD. File-scope so
-/// it does not occupy ``SegmentRoot`` body length; it does not
-/// reference the held `rootFD`.
+/// Returns a descriptor for a newly-created segment with `0o600`
+/// enforced descriptor-relative, or `nil` when the segment already
+/// existed (`EEXIST`). Other failures throw.
+private func createSegmentForWritingDescriptorRelative(
+    rootFD: Int32,
+    url: URL
+) throws(InternalReadError) -> Int32? {
+    let leaf = url.lastPathComponent
+    let descriptor = leaf.withCString { cName in
+        Darwin.openat(
+            rootFD, cName,
+            O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+            0o600
+        )
+    }
+    if descriptor < 0 {
+        let savedErrno = errno
+        if savedErrno == EEXIST { return nil }
+        throw .operationFailed(
+            operation: .openSegment,
+            url: url,
+            context: FileSystemErrorContext(
+                domain: NSPOSIXErrorDomain,
+                code: Int(savedErrno),
+                description: "segment write open failed"
+            )
+        )
+    }
+    // `openat` mode is filtered by the process umask, which can mask
+    // owner bits; `fchmod` re-applies the exact `0o600` the
+    // writer-private contract requires.
+    if Darwin.fchmod(descriptor, 0o600) != 0 {
+        let savedErrno = errno
+        // Unlink before close: while the descriptor is still open the
+        // path resolves to the temp object we just created, so the
+        // unlink targets exactly that object. Close-before-unlink
+        // would open a small window where the path could resolve to
+        // an unrelated entry.
+        let unlinkResult = leaf.withCString { cName in
+            Darwin.unlinkat(rootFD, cName, 0)
+        }
+        let unlinkErrno = unlinkResult != 0 ? errno : 0
+        var descriptorToClose = descriptor
+        closeDescriptorIgnoringResultOnce(&descriptorToClose)
+        var description = "segment write permission-bit preservation failed"
+        if unlinkResult != 0 {
+            description += "; cleanup unlink failed errno \(unlinkErrno)"
+        }
+        throw .operationFailed(
+            operation: .openSegment,
+            url: url,
+            context: FileSystemErrorContext(
+                domain: NSPOSIXErrorDomain,
+                code: Int(savedErrno),
+                description: description
+            )
+        )
+    }
+    return descriptor
+}
+
+/// Closes `descriptor` once, ignoring the result, and immediately
+/// invalidates the handle to `-1`. After the call returns the
+/// caller must not reference the descriptor again.
+private func closeDescriptorIgnoringResultOnce(_ descriptor: inout Int32) {
+    guard descriptor >= 0 else { return }
+    let closingDescriptor = descriptor
+    descriptor = -1
+    _ = Darwin.close(closingDescriptor)
+}
+
+/// Validates `descriptor` as a regular file and returns an owning handle.
 private func validateRegularFileFD(
     _ descriptor: Int32,
     url: URL
@@ -511,30 +574,28 @@ private func validateRegularFileFD(
     var statBuf = stat()
     if fstat(descriptor, &statBuf) != 0 {
         let savedErrno = errno
-        // Best-effort cleanup before throwing; close failure
-        // does not change the projected open-segment error.
-        _ = Darwin.close(descriptor)
+        var descriptorToClose = descriptor
+        closeDescriptorIgnoringResultOnce(&descriptorToClose)
         throw .operationFailed(
             operation: .openSegment,
             url: url,
             context: FileSystemErrorContext(
                 domain: NSPOSIXErrorDomain,
                 code: Int(savedErrno),
-                description: "fstatFailed"
+                description: "segment metadata read failed"
             )
         )
     }
     guard (statBuf.st_mode & S_IFMT) == S_IFREG else {
-        // Best-effort cleanup before throwing; close failure
-        // does not change the projected open-segment error.
-        _ = Darwin.close(descriptor)
+        var descriptorToClose = descriptor
+        closeDescriptorIgnoringResultOnce(&descriptorToClose)
         throw .operationFailed(
             operation: .openSegment,
             url: url,
             context: FileSystemErrorContext(
                 domain: FileSystemErrorContext.packageDomain,
                 code: nil,
-                description: "segmentNotRegularFile"
+                description: "segment is not a regular file"
             )
         )
     }
@@ -561,21 +622,11 @@ private func decodeEntryName(
 
 // MARK: - DuplicateRotatedSegmentTracker
 
-/// Streaming companion to ``SegmentRoot/highestRotatedSegmentSequence()``.
-/// Records observed `(sequence, name)` pairs in O(1) amortized time
-/// per observation and answers "is there a duplicate, and which
-/// pair would be reported?" deterministically — independent of the
-/// `readdir` order in which observations arrived.
+/// Tracks duplicate rotated-segment spellings for streaming
+/// highest-sequence discovery.
 ///
-/// Per sequence, the tracker keeps only the two lex-smallest
-/// regular-file spellings seen so far; later spellings strictly
-/// greater than the running second-smallest are discarded. After
-/// the scan completes, ``firstDuplicate()`` returns the smallest
-/// numeric sequence that has at least two spellings, alongside
-/// those two lex-smallest spellings. Callers project that pair
-/// onto the same diagnostic URL that
-/// ``SegmentRoot/enumerateRotatedSegments()`` would report after
-/// its `(sequence, lastPathComponent)` sort.
+/// Diagnostics are deterministic and match sorted rotated-segment
+/// enumeration.
 internal struct DuplicateRotatedSegmentTracker {
     /// Two lex-smallest spellings observed for one sequence,
     /// alongside that sequence — the diagnostic payload for a

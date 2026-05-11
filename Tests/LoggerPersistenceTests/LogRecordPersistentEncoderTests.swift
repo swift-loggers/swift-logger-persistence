@@ -154,6 +154,38 @@ struct LogRecordPersistentEncoderTests {
     }
 
     @Test(
+        "Domain and attribute key are persisted verbatim while privacy redaction covers the value",
+        .tags(.lgp4, .lgp21)
+    )
+    func domainAndAttributeKeyArePersistedVerbatim() throws {
+        let encoder = LogRecordPersistentEncoder()
+        let envelope = try encoder.encode(
+            Self.makeRecord(
+                domain: "AccountDomain",
+                attributes: [
+                    LogAttribute("accountId", "alice", privacy: .sensitive)
+                ]
+            )
+        )
+        let payload = try payloadString(envelope)
+
+        // Privacy redaction covers the attribute value: raw "alice"
+        // never reaches the payload.
+        #expect(payload.contains(#""value":"<redacted>""#))
+        #expect(!payload.contains("alice"))
+
+        // Record domain is metadata / key material — persisted verbatim
+        // in payload + envelope hints. Callers must keep domain names
+        // non-sensitive and PII-free.
+        #expect(payload.contains(#""domain":"AccountDomain""#))
+        #expect(envelope.hints["domain"] == "AccountDomain")
+
+        // Attribute key is metadata / key material — persisted verbatim.
+        // Callers must keep attribute keys non-sensitive and PII-free.
+        #expect(payload.contains(#""key":"accountId""#))
+    }
+
+    @Test(
         "Encoder preserves typed LogValue for public attributes",
         .tags(.lgp21)
     )

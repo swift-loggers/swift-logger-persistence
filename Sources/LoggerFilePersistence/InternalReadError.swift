@@ -22,9 +22,9 @@ internal enum InternalReadError: Error, Sendable, Equatable {
     /// Interior corruption was detected mid-segment.
     ///
     /// Carries the byte offset where the corruption was first
-    /// observed and a ``InternalCorruptionClass`` per
-    /// `Docs/FileFormatSpec.md` ("Corruption/Recovery"). The read
-    /// path hard-stops on this case.
+    /// observed and a ``InternalCorruptionClass`` per the
+    /// file-format specification ("Corruption/Recovery"). The
+    /// read path hard-stops on this case.
     case interiorCorruption(
         segmentURL: URL,
         byteOffset: UInt64,
@@ -46,9 +46,9 @@ internal enum InternalReadOperation: String, Sendable, Equatable {
 /// The class of interior corruption observed during byte-stable
 /// scanning.
 ///
-/// Classes correspond 1:1 to the recovery taxonomy in
-/// `Docs/FileFormatSpec.md` ("Corruption/Recovery") and to the
-/// corpus fixtures under `Tests/.../Fixtures/Corpus`.
+/// Classes correspond 1:1 to the recovery taxonomy in the
+/// file-format specification ("Corruption/Recovery") and to the
+/// corpus fixtures.
 internal enum InternalCorruptionClass: Sendable, Equatable {
     /// A scanned byte boundary was not a valid UTF-8 sequence.
     case malformedUTF8
@@ -62,7 +62,7 @@ internal enum InternalCorruptionClass: Sendable, Equatable {
     /// The envelope's `payload` field was not standard base64.
     case malformedBase64
     /// JSON parsed as an object but did not satisfy the envelope
-    /// shape required by `Docs/FileFormatSpec.md`.
+    /// shape required by the file-format specification.
     case invalidEnvelope
     /// The line delimiter was not LF (e.g. CRLF, mixed CRLF/LF).
     case invalidDelimiter

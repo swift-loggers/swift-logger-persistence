@@ -10,10 +10,10 @@ enum CanonicalEnvelopeEncodingError: Error, Equatable {
 /// Encodes a `PersistentLogEnvelope` into one canonical
 /// LF-terminated NDJSON envelope line.
 ///
-/// Wire format defined by `Docs/FileFormatSpec.md` ("Wire Format"
-/// and "Deterministic Encoding"): one LF-terminated JSON object
-/// per envelope, canonical key order, canonical RFC 3339 UTC
-/// millisecond timestamp, base64-encoded payload.
+/// Wire format defined by the file-format specification ("Wire
+/// Format" and "Deterministic Encoding"): one LF-terminated JSON
+/// object per envelope, canonical key order, canonical RFC 3339
+/// UTC millisecond timestamp, base64-encoded payload.
 struct CanonicalEnvelopeLineEncoder {
     /// Returns the canonical LF-terminated NDJSON bytes for one
     /// envelope.
