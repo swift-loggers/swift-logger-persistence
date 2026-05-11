@@ -165,8 +165,8 @@ M3.3.0 baseline capabilities:
 - no replay APIs
 - no retention enforcement
 
-M3.3.2 adds byte-stable export, destructive removal, and count/byte
-retention below. Age-based retention remains deferred.
+M3.3.2 adds byte-stable export, destructive removal, and count-,
+byte-, and age-based retention below.
 
 Segment topology is outside the portable compatibility contract.
 
@@ -405,6 +405,9 @@ public struct RetentionPolicy: Sendable, Equatable {
     public static func maxTotalBytes(
         _ bytes: Int
     ) throws(FileLogStoreConfigurationError) -> Self
+    public static func maxAge(
+        seconds: Int64
+    ) throws(FileLogStoreConfigurationError) -> Self
 }
 
 public enum FileLogStoreConfigurationError: Error, Sendable, Equatable {
@@ -430,6 +433,16 @@ to satisfy the bound, which retention is forbidden from doing.
 encoded-line cap must be admittable into a fresh empty segment; a
 smaller cap would force retention to consider deleting a segment
 containing the line that just admitted it.
+
+`RetentionPolicy.maxAge(seconds:)` rejects values below `1`. Age
+retention deletes a rotated segment once `now - mtime >= seconds`,
+where `mtime` is the filesystem modification time read by
+`fstatat(AT_SYMLINK_NOFOLLOW)`. The policy does not parse envelope
+payloads or accepted-line timestamps and does not depend on
+calendar/DST math. The active writer segment is never deleted, even
+when its mtime would qualify. Candidate ordering is mtime-ascending
+with the segment-enumerator's sequence-ascending order as a
+deterministic tie-break.
 
 Retention enforcement runs after a successful `append` admission inline
 while the append still holds the nonreentrant operation boundary.
@@ -474,22 +487,6 @@ and boundary monotonicity are defined.
 ## Future shape (deferred)
 
 Deferred non-normative sketches.
-
-### Age-based retention
-
-`RetentionPolicy.maxAge(seconds:)` is deferred. Age semantics require
-an explicit source-of-truth decision (filesystem metadata vs.
-accepted-line timestamps) and must not be guessed in the same
-milestone as count and byte retention.
-
-```text
-public struct RetentionPolicy: Sendable, Equatable {
-    /// Monotonic elapsed-time policy; not calendar/DST age.
-    public static func maxAge(
-        seconds: Int64
-    ) throws(FileLogStoreConfigurationError) -> Self        // Deferred
-}
-```
 
 ### File protection -- when actually applied at write
 

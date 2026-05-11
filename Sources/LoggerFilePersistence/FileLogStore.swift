@@ -79,7 +79,8 @@ public actor FileLogStore: PersistentLogStore {
     /// Thrown errors project to `.commitDestination`.
     internal var onBeforeCommitForTesting: (@Sendable () throws -> Void)?
 
-    /// TEST-ONLY: installs a seam after admitted append bytes reach storage.
+    /// TEST-ONLY: installs a seam after accepted append bytes reach
+    /// storage and before retention enforcement.
     internal var onAfterAppendForTesting: (@Sendable () -> Void)?
 
     /// TEST-ONLY: installs a seam after append acquires the operation boundary.
@@ -106,14 +107,27 @@ public actor FileLogStore: PersistentLogStore {
     internal var onBeforePreReplaceRevalidateForTesting: (@Sendable (URL) throws -> Void)?
 
     /// TEST-ONLY: rotated-topology classification override.
+    /// Non-nil overrides replace normal topology classification.
     internal var rotatedTopologyOverrideForTesting: (@Sendable () -> InternalReadError?)?
 
     /// TEST-ONLY: installs a seam before each retention segment deletion.
     /// Thrown errors project to `.enforceRetention`.
     internal var onBeforeRetentionUnlinkForTesting: (@Sendable (URL) throws -> Void)?
 
+    /// TEST-ONLY: installs a seam before closing the just-rotated
+    /// predecessor segment, after the new segment is already
+    /// installed as active. Thrown errors project to
+    /// `.closeWritableSegment` and follow the same pending-close
+    /// recovery path as a natural close failure.
+    internal var onBeforeRotatedSegmentCloseForTesting: (@Sendable (URL) throws -> Void)?
+
+    /// TEST-ONLY: overrides the wall-clock `now` consulted by
+    /// time-based retention policies so age decisions are
+    /// deterministic against a synthetic clock.
+    internal var nowForRetentionTesting: (@Sendable () -> Date)?
+
     /// TEST-ONLY: installs a seam between successful leaf `mkdir(2)`
-    /// and the umask-independent permission preservation step.
+    /// and the owner-only permission application step.
     /// Thrown errors project to `.createDirectory`.
     internal var onBeforeDirectoryChmodForTesting: (@Sendable (URL) throws -> Void)?
 
@@ -191,9 +205,12 @@ public actor FileLogStore: PersistentLogStore {
                 context: FileSystemErrorContext(from: error)
             )
         }
+        // Fires after accepted bytes reach storage but before
+        // retention enforcement so tests can pin the post-write
+        // pre-retention state.
+        onAfterAppendForTesting?()
         // Retention runs inside the append boundary after admission.
         try enforceRetention()
-        onAfterAppendForTesting?()
     }
 
     /// Verifies the encoded line ends with the canonical trailing
@@ -328,6 +345,9 @@ public actor FileLogStore: PersistentLogStore {
         let next = try openNewSegment(root: root, url: url, sequence: nextSequence)
         activeSegment = next
         do {
+            if let hook = onBeforeRotatedSegmentCloseForTesting {
+                try hook(current.url)
+            }
             try current.handle.close()
         } catch {
             pendingCloseHandles.append(current.handle)

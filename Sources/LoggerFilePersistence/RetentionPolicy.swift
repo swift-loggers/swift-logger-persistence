@@ -11,12 +11,18 @@
 /// the portable wire-format contract per the file-format
 /// specification.
 public struct RetentionPolicy: Sendable, Equatable {
+    /// Package-internal so `FileLogStoreRetention` can pattern-match
+    /// the configured retention class when enforcement runs; not
+    /// part of the public API surface.
     enum Kind: Sendable, Equatable {
         case unlimited
         case maxSegments(count: Int)
         case maxTotalBytes(bytes: Int)
+        case maxAge(seconds: Int64)
     }
 
+    /// Package-internal so the enforcement extension can switch on
+    /// the configured class without exposing `Kind` publicly.
     let kind: Kind
 
     private init(kind: Kind) {
@@ -67,5 +73,31 @@ public struct RetentionPolicy: Sendable, Equatable {
             throw .invalidRetentionPolicy
         }
         return RetentionPolicy(kind: .maxTotalBytes(bytes: bytes))
+    }
+
+    /// Keeps regular rotated segments whose modification time is
+    /// within `seconds` of the current wall-clock under
+    /// ``RotationPolicy/bySize(maxSegmentBytes:)``. A rotated
+    /// segment is deletable once `now - mtime >= seconds`. The
+    /// active writer segment is never deleted regardless of age.
+    ///
+    /// Source of truth is the filesystem modification time
+    /// (`mtime`) of the rotated segment file. The policy does not
+    /// parse envelope payloads or accepted-line timestamps.
+    /// Out-of-band `mtime` changes affect age-retention eligibility.
+    ///
+    /// This is a segment-retention topology limit, not a replay/export
+    /// age guarantee.
+    ///
+    /// - Throws: ``FileLogStoreConfigurationError/invalidRetentionPolicy``
+    ///   when `seconds` is below `1`. A non-positive bound would make
+    ///   every rotated segment immediately eligible for deletion.
+    public static func maxAge(
+        seconds: Int64
+    ) throws(FileLogStoreConfigurationError) -> RetentionPolicy {
+        guard seconds >= 1 else {
+            throw .invalidRetentionPolicy
+        }
+        return RetentionPolicy(kind: .maxAge(seconds: seconds))
     }
 }

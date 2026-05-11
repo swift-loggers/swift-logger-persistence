@@ -47,7 +47,8 @@ extension FileLogStore {
         onBeforeCommitForTesting = hook
     }
 
-    /// TEST-ONLY: installs a seam after admitted append bytes reach storage.
+    /// TEST-ONLY: installs a seam after accepted append bytes reach
+    /// storage and before retention enforcement.
     internal func _setOnAfterAppendForTesting(
         _ hook: (@Sendable () -> Void)?
     ) {
@@ -101,6 +102,7 @@ extension FileLogStore {
     }
 
     /// TEST-ONLY: installs a rotated-topology classification override.
+    /// Non-nil overrides replace normal topology classification.
     internal func _setRotatedTopologyOverrideForTesting(
         _ hook: (@Sendable () -> InternalReadError?)?
     ) {
@@ -115,13 +117,33 @@ extension FileLogStore {
         onBeforeRetentionUnlinkForTesting = hook
     }
 
+    /// TEST-ONLY: installs a seam before closing the just-rotated
+    /// predecessor segment, after the new segment is already
+    /// installed as active. Thrown errors project to
+    /// `.closeWritableSegment` and follow the same pending-close
+    /// recovery path as a natural close failure.
+    internal func _setOnBeforeRotatedSegmentCloseForTesting(
+        _ hook: (@Sendable (URL) throws -> Void)?
+    ) {
+        onBeforeRotatedSegmentCloseForTesting = hook
+    }
+
     /// TEST-ONLY: installs a seam between successful leaf `mkdir(2)`
-    /// and the umask-independent permission preservation step.
+    /// and the owner-only permission application step.
     /// Thrown errors project to `.createDirectory`.
     internal func _setOnBeforeDirectoryChmodForTesting(
         _ hook: (@Sendable (URL) throws -> Void)?
     ) {
         onBeforeDirectoryChmodForTesting = hook
+    }
+
+    /// TEST-ONLY: overrides the wall-clock `now` consulted by
+    /// time-based retention policies so age decisions are
+    /// deterministic against a synthetic clock.
+    internal func _setNowForRetentionTesting(
+        _ hook: (@Sendable () -> Date)?
+    ) {
+        nowForRetentionTesting = hook
     }
 
     // swiftlint:enable identifier_name

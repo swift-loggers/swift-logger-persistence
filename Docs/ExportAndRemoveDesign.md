@@ -1,15 +1,16 @@
 # Export and Remove Design
 
 Non-normative design notes for the shipped byte-stable export
-contract, destructive remove lifecycle, and count/byte retention
-policy. Locked API guarantees live in `Docs/APIDesign.md`;
+contract, destructive remove lifecycle, and count-, byte-, and
+age-based retention policy. Locked API guarantees live in
+`Docs/APIDesign.md`;
 file-format semantics live in `Docs/FileFormatSpec.md`.
 
 ## Status
 
 The byte-stable export, export-serialization, protocol ownership,
-destructive remove, and count/byte retention contracts are
-implemented and locked. Age-based retention remains deferred.
+destructive remove, and count-, byte-, and age-based retention
+contracts are implemented and locked.
 
 ## Protocol Shape (locked)
 
@@ -67,12 +68,12 @@ independently from byte-stable export.
 ## Retention Policy
 
 Retention policy remains a separate layer from
-`removeExportedLogs()`. Count- and byte-cap retention
-(`.maxSegments`, `.maxTotalBytes`) ship in M3.3.2: retention
-runs after a successful append admission, holds the same
-nonreentrant operation boundary append already holds, and deletes
-whole rotated segments only — never the active writer segment, never
-inside-segment prefix bytes. Age-based retention
-(`.maxAge(seconds:)`) remains deferred until source-of-truth
-semantics (filesystem metadata vs. accepted-line timestamps) are
-locked.
+`removeExportedLogs()`. Count-, byte-, and age-cap retention
+(`.maxSegments`, `.maxTotalBytes`, `.maxAge(seconds:)`) ship in
+M3.3.2: retention runs after a successful append admission, holds the
+same nonreentrant operation boundary append already holds, and
+deletes whole rotated segments only — never the active writer
+segment, never inside-segment prefix bytes. Age retention reads
+filesystem `mtime` via `fstatat(AT_SYMLINK_NOFOLLOW)`; it does not
+parse envelope payloads or accepted-line timestamps and does not
+depend on calendar/DST math.

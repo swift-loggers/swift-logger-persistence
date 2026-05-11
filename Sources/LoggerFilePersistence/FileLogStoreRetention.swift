@@ -27,6 +27,8 @@ extension FileLogStore {
             try enforceMaxSegments(count: count)
         case let (.maxTotalBytes(bytes), .bySize):
             try enforceMaxTotalBytes(cap: UInt64(bytes))
+        case let (.maxAge(seconds), .bySize):
+            try enforceMaxAge(seconds: seconds)
         }
     }
 
@@ -78,6 +80,64 @@ extension FileLogStore {
         }
     }
 
+    /// Deletes rotated segments whose modification time is at least
+    /// `seconds` older than the current wall-clock. The active
+    /// writer segment is never selected for deletion, even when it
+    /// would otherwise qualify by age.
+    ///
+    /// Source of truth is `fstatat(AT_SYMLINK_NOFOLLOW)` `st_mtimespec`
+    /// on each candidate; the policy does not parse envelope
+    /// payloads or accepted-line timestamps. Candidates are
+    /// deleted oldest-mtime first, with sequence ascending as the
+    /// deterministic tie-break inherited from the enumerator.
+    private func enforceMaxAge(seconds: Int64) throws(FileLogStoreError) {
+        guard let root = writerRoot else { return }
+        let segments = try enumerateRotatedSegmentsForRetention(root: root)
+        let nowSeconds = (nowForRetentionTesting?() ?? Date()).timeIntervalSince1970
+        // Production `Date()` is finite; a test clock seam that
+        // returns a non-finite value would silently no-op age
+        // selection (any NaN comparison is false). Fail loudly
+        // so the test misconfiguration surfaces.
+        guard nowSeconds.isFinite else {
+            throw .operationFailed(
+                operation: .enforceRetention,
+                url: configuration.directory,
+                context: FileSystemErrorContext(
+                    domain: FileSystemErrorContext.packageDomain,
+                    code: nil,
+                    description: "retention clock returned non-finite seconds"
+                )
+            )
+        }
+        let cap = TimeInterval(seconds)
+        var aged: [AgedSegment] = []
+        aged.reserveCapacity(segments.count)
+        for entry in segments {
+            if isActiveSegment(at: entry.url) { continue }
+            let metadata = try readRegularRetentionSegmentMetadata(
+                rootFD: root.rootFD, url: entry.url
+            )
+            if nowSeconds - metadata.mtime >= cap {
+                aged.append(AgedSegment(
+                    url: entry.url,
+                    sequence: entry.sequence,
+                    mtime: metadata.mtime
+                ))
+            }
+        }
+        // Deterministic order comes from the comparator, not from
+        // Swift `sort(by:)` stability guarantees: `mtime` ascending
+        // with `sequence` ascending as the tie-break breaks every
+        // equal-mtime pair to the lower-sequence segment.
+        aged.sort { lhs, rhs in
+            if lhs.mtime != rhs.mtime { return lhs.mtime < rhs.mtime }
+            return lhs.sequence < rhs.sequence
+        }
+        for entry in aged {
+            try unlinkRetentionEntry(rootFD: root.rootFD, url: entry.url)
+        }
+    }
+
     private func enumerateRotatedSegmentsForRetention(
         root: SegmentRoot
     ) throws(FileLogStoreError) -> [(url: URL, sequence: UInt64)] {
@@ -121,7 +181,23 @@ extension FileLogStore {
                 )
             )
         }
-        return RetentionSegmentMetadata(size: UInt64(statBuf.st_size))
+        guard statBuf.st_size >= 0 else {
+            throw .operationFailed(
+                operation: .enforceRetention,
+                url: url,
+                context: FileSystemErrorContext(
+                    domain: FileSystemErrorContext.packageDomain,
+                    code: nil,
+                    description: "retention candidate reported negative size"
+                )
+            )
+        }
+        let mtimeSeconds = Double(statBuf.st_mtimespec.tv_sec)
+            + Double(statBuf.st_mtimespec.tv_nsec) / 1_000_000_000
+        return RetentionSegmentMetadata(
+            size: UInt64(statBuf.st_size),
+            mtime: mtimeSeconds
+        )
     }
 
     /// Revalidates and deletes one retention candidate under the held root.
@@ -166,6 +242,18 @@ extension FileLogStore {
 
 private struct RetentionSegmentMetadata {
     let size: UInt64
+    /// Modification time as seconds since the Unix epoch with
+    /// nanosecond precision, sourced from `fstatat(AT_SYMLINK_NOFOLLOW)`.
+    let mtime: TimeInterval
+}
+
+/// One `.maxAge` deletion candidate paired with its modification
+/// time so age-ascending sort can survive equal-mtime ties via the
+/// enumerator's sequence-ascending order.
+private struct AgedSegment {
+    let url: URL
+    let sequence: UInt64
+    let mtime: TimeInterval
 }
 
 /// Pure selection helper for `RetentionPolicy.maxTotalBytes(cap)`.

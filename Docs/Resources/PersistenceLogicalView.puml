@@ -17,42 +17,33 @@ skinparam rectangle {
   FontColor #0F172A
   RoundCorner 8
 }
-skinparam package {
-  BorderColor #CBD5E1
-  FontColor #334155
-  BackgroundColor #FFFFFF
-}
-
 top to bottom direction
 
 rectangle "Logger adapter\n(upstream; out of scope)" as Adapter #F8FAFC
 rectangle "LogRecordPersistentEncoder\nredaction + producer sequence" as Encoder #F8FAFC
 rectangle "PersistentLogEnvelope\npackage-owned write unit" as Envelope #F8FAFC
 rectangle "PersistentLogStore\n<<protocol>>\nappend / flush" as Store #EFF6FF
-rectangle "FileLogStore\nfile-backed accepted-line persistence" as FileStore #ECFDF5
+rectangle "FileLogStore\nfile-backed local persistence" as FileStore #ECFDF5
 
-package "Optional file-store surfaces" {
-  rectangle "ExportableLogStore\n<<protocol>>" as Exportable #FFF7ED
-  rectangle "Byte-stable export\nexportLogs(to:)" as Export #FFF7ED
-  rectangle "Destructive removal\nremoveExportedLogs()" as Remove #FFF7ED
-  rectangle "Retention policy\ncount/byte (shipped); age (deferred)" as Retention #FFF7ED
-}
+rectangle "ExportableLogStore\noptional file-store protocol" as Exportable #FFF7ED
+rectangle "Byte-stable export\nexportLogs(to:)" as Export #FFF7ED
+rectangle "Destructive removal\nremoveExportedLogs()" as Remove #FFF7ED
+rectangle "File-store retention policy\noptional lifecycle surface\ncount, byte, age (shipped)" as Retention #FFF7ED
 
-package "Contract owners" {
-  rectangle "FileFormatSpec.md\naccepted bytes\naccepted ordering\nrecoverable visibility" as Format #F5F3FF
-  rectangle "APIDesign.md\nAPI-observable guarantees" as API #F5F3FF
-  rectangle "APICompatibility.md\npublic diagnostics evolution" as Compatibility #F5F3FF
-}
+rectangle "FileFormatSpec.md\nnormative contract owner\naccepted bytes\naccepted ordering\nrecoverable visibility" as Format #F5F3FF
+rectangle "APIDesign.md\nAPI-observable contract owner" as API #F5F3FF
+rectangle "APICompatibility.md\npublic diagnostics evolution" as Compatibility #F5F3FF
 
 Adapter -down-> Encoder
 Encoder -down-> Envelope
 Envelope -down-> Store
 Store -down-> FileStore
 
-FileStore -down-> Exportable
+FileStore -right-> Exportable
+FileStore -right-> Retention
+Exportable -[hidden]down-> Retention
 Exportable -down-> Export
 Export -down-> Remove
-Remove -down-> Retention
 
 FileStore -right-> Format
 Exportable -right-> API

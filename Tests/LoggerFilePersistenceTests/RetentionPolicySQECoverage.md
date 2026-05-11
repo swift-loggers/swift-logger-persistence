@@ -16,11 +16,15 @@ For the target-level index, see
 
 | Contract area | Requirement IDs | Primary coverage | Closure proof |
 | --- | --- | --- | --- |
-| Public configuration surface | LGP-2, LGP-7 | `FileLogStoreRetentionTests.swift` | `RetentionPolicy` factories validate (`.maxSegments(0)` and `.maxTotalBytes(< maxEncodedLineBytes)` reject), boundary-equality factories accept, and `Configuration(directory:)` / `Configuration(directory:rotation:)` default `retention = .unlimited`. Explicit `retention` is round-tripped through `Configuration(directory:rotation:retention:)`. |
+| Public configuration surface | LGP-2, LGP-7 | `FileLogStoreRetentionTests.swift` | `RetentionPolicy` factories validate (`.maxSegments(0)`, `.maxTotalBytes(< maxEncodedLineBytes)`, and `.maxAge(seconds: <= 0)` reject), boundary-equality factories accept, and `Configuration(directory:)` / `Configuration(directory:rotation:)` default `retention = .unlimited`. Explicit `retention` is round-tripped through `Configuration(directory:rotation:retention:)`. |
 | `.unlimited` no-op enforcement | LGP-7, LGP-25, LGP-27 | `FileLogStoreRetentionTests.swift` | Five rotation-sized appends produce five rotated segments; topology and per-segment bytes match canonical encoder bytes byte-for-byte. |
-| `.never` rotation no-op | LGP-7, LGP-25, LGP-27 | `FileLogStoreRetentionTests.swift` | Both `.maxSegments` and `.maxTotalBytes` under `.never` rotation leave `log.ndjson` byte-for-byte equal to concatenated canonical-encoded admitted lines and produce no rotated segment. |
+| `.never` rotation no-op | LGP-7, LGP-25, LGP-27 | `FileLogStoreRetentionTests.swift` | `.maxSegments`, `.maxTotalBytes`, and `.maxAge` under `.never` rotation leave `log.ndjson` byte-for-byte equal to concatenated canonical-encoded admitted lines and produce no rotated segment. |
 | `.bySize` `.maxSegments` | LGP-7, LGP-25 | `FileLogStoreRetentionTests.swift` | Four appends under `.maxSegments(2)` retain only the two newest rotated segments (`log.000003` + `log.000004` active); three appends under `.maxSegments(1)` retain only the active segment. |
 | `.bySize` `.maxTotalBytes` | LGP-7, LGP-25 | `FileLogStoreRetentionTests.swift` | Four appends under `.maxTotalBytes(2 × maxEncodedLineBytes)` drop the oldest until total ≤ cap; under a cap below two lines, deletion stops at the active writer segment. |
+| `.bySize` `.maxAge` enforcement | LGP-7, LGP-25 | `FileLogStoreRetentionTests.swift` | Under a synthetic clock seam, rotated segments whose pinned `mtime` satisfies `now - mtime >= seconds` are deleted oldest-first while fresher segments survive. The boundary case `now - mtime == seconds` deletes. Unexpired segments stay across an append-triggered enforcement pass. Active writer segment is never deleted regardless of its `mtime`. Under `.never` rotation, `.maxAge` is a no-op: the single active `log.ndjson` is preserved even with `mtime` far past the cap. |
+| `.maxAge` failure injection | LGP-2, LGP-7 | `FileLogStoreRetentionTests.swift` | Injected `unlink` failure surfaces `.operationFailed(.enforceRetention, url: <segment>, ...)`. The triggering append remains admitted; the segment retention attempted to unlink remains on disk. |
+| `.maxAge` candidate revalidation | LGP-2, LGP-7 | `FileLogStoreRetentionTests.swift` | A symlink replacement between the unlink seam and the actual unlink fails closed with `.operationFailed(.enforceRetention)`; the triggering append remains admitted, the planted symlink stays in place, and the symlink target's bytes remain unchanged. |
+| `.maxAge` export / remove stability | LGP-7, LGP-8, LGP-9 | `FileLogStoreRetentionTests.swift` | A `.maxAge` pass that retains the boundary segment leaves a captured removal boundary still valid: a subsequent `removeExportedLogs()` consumes the boundary and removes the exported segment. |
 | Append cardinality preserved | LGP-7, LGP-11, LGP-25, LGP-27 | `FileLogStoreRetentionTests.swift` | After retention deletes older segments, the remaining rotated segment and the active segment carry the canonical bytes for the corresponding sequences byte-for-byte. |
 | Export interaction | LGP-7, LGP-8, LGP-32 | `FileLogStoreRetentionTests.swift` | Export after retention concatenates canonical bytes for the retained segments only; older retention-deleted segments are not visible. |
 | Remove interaction (stale boundary) | LGP-7, LGP-9 | `FileLogStoreRetentionTests.swift` | A successful export captures a boundary referencing segment `log.000001`; a follow-up append under `.maxSegments(2)` retention deletes that segment, after which `removeExportedLogs()` fails with `.removalBoundaryStale`. |
@@ -34,7 +38,12 @@ For the target-level index, see
 - Whole-rotated-segment deletion only: retention never compacts a
   segment, splits a line, or deletes inside-segment bytes.
 - Active writer segment is never deleted regardless of policy.
-- `.unlimited` and `.never` enforcement paths are no-ops.
+- `.unlimited` and `.never` enforcement paths are no-ops (including
+  `.never` + `.maxAge`).
+- `.maxAge` source of truth is filesystem `mtime` read via
+  `fstatat(AT_SYMLINK_NOFOLLOW)`. Age decisions do not parse envelope
+  payloads or accepted-line timestamps. Synthetic clock + pinned
+  `mtime` drives every age test; no real-time sleep.
 - Failure surface is `FileLogStoreError.operationFailed(.enforceRetention)`;
   admission of the triggering append is preserved.
 - Descriptor-relative safety is reviewed through topology-state
