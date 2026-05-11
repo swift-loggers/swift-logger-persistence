@@ -128,12 +128,15 @@ defined by
 The original M3.3.0 append/flush milestone scope did not impose
 retention or rotation limits. M3.3.1 adds size-based rotation. M3.3.2
 adds byte-stable export for parser-profile-accepted recoverable data,
-destructive removal, and count-and-byte retention. Count-and-byte
-retention enforcement is a synchronous destructive lifecycle operation
+destructive removal, and count-, byte-, and age-based retention. Retention
+enforcement is a synchronous destructive lifecycle operation
 triggered inline by append operations; it can unlink retained rotated
 segments within the caller append path. It is not a background worker
 or service and performs no autonomous maintenance between append calls.
-Age-based retention remains deferred.
+Age-based retention is shipped for whole rotated segments and uses the
+filesystem modification time (`mtime`) of the segment file as its
+source of truth; it does not parse envelope payloads or accepted-line
+timestamps.
 
 `FileLogStore` is a local persistence layer, not a complete audit-log
 platform. Regulated deployments that require additional
@@ -161,11 +164,12 @@ package.
   releases, with source-compatible additive enum-case evolution
   guarantees only where explicitly documented; diagnostic enums remain
   non-exhaustive by explicit contract unless marked `@frozen`.
-- [`Docs/APIDesign.md`](Docs/APIDesign.md) -- API design draft,
-  including file-store export/remove surfaces and destructive retention
-  API design (age-based retention deferred); it is
-  intentionally non-normative for wire-format and persistence semantics
-  defined by `FileFormatSpec.md`, which remains the normative source.
+- [`Docs/APIDesign.md`](Docs/APIDesign.md) -- API design for the
+  shipped `0.1.x` surface, including file-store export/remove
+  surfaces and count-, byte-, and age-based retention; it is intentionally
+  non-normative for wire-format and persistence semantics defined
+  by [`Docs/FileFormatSpec.md`](Docs/FileFormatSpec.md), which
+  remains the normative source.
 - [`Docs/Architecture.md`](Docs/Architecture.md) -- non-normative
   design overview (scope, non-goals, layering, logical view, failure
   model).

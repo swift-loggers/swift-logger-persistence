@@ -5,6 +5,11 @@ import Testing
 
 @testable import LoggerFilePersistence
 
+// swiftlint:disable type_body_length
+// Reason: LOCKED rotation SQE matrix kept in one type so the
+// validation, configuration, topology, boundary, and rotated-segment
+// close-failure proofs stay co-located for traceability.
+
 @Suite("FileLogStore size-based rotation")
 struct FileLogStoreRotationTests {
     // MARK: RotationPolicy validation
@@ -248,7 +253,6 @@ struct FileLogStoreRotationTests {
         let bytes2 = try Data(contentsOf: FileLogStoreTestSupport.rotatedSegmentURL(in: directory, sequence: 2))
         let line3 = try CanonicalEnvelopeLineEncoder().encode(envelope3)
         #expect(bytes2 == line3)
-        #expect(bytes2.first == line3.first)
         #expect(bytes2.last == 0x0A)
     }
 
@@ -289,4 +293,93 @@ struct FileLogStoreRotationTests {
         #expect(secondSegment == expected[2] + expected[3])
         #expect(thirdSegment == expected[4])
     }
+
+    // MARK: Rotated-segment close failure
+
+    @Test(
+        "Rotation close failure surfaces .closeWritableSegment, admits no bytes, leaves new active recoverable",
+        .tags(.lgp2, .lgp6)
+    )
+    func rotationCloseFailureSurfacesCloseWritableSegment() async throws {
+        let directory = FileLogStoreTestSupport.uniqueDirectory()
+        defer { FileLogStoreTestSupport.remove(directory) }
+        let rotation = try RotationPolicy.bySize(
+            maxSegmentBytes: FileLogStore.maxEncodedLineBytes
+        )
+        let store = FileLogStore(
+            configuration: .init(directory: directory, rotation: rotation)
+        )
+        let encoder = CanonicalEnvelopeLineEncoder()
+        let envelope1 = try FileLogStoreTestSupport.makeEnvelope(sequence: 1)
+        let envelope2 = try FileLogStoreTestSupport.makeEnvelope(sequence: 2)
+        let envelope3 = try FileLogStoreTestSupport.makeEnvelope(sequence: 3)
+        let encoded1 = try encoder.encode(envelope1)
+        let encoded3 = try encoder.encode(envelope3)
+
+        // First append fills log.000001 to the rotation cap; the
+        // next append must rotate.
+        try await store.append(envelope1)
+
+        struct InjectedRotationCloseError: Error {}
+        try await Self.withRotatedSegmentCloseSeam(
+            on: store,
+            handler: { _ in throw InjectedRotationCloseError() },
+            body: {
+                do {
+                    try await store.append(envelope2)
+                    Issue.record("expected .operationFailed(.closeWritableSegment)")
+                } catch let error as FileLogStoreError {
+                    switch error {
+                    case let .operationFailed(operation, url, _):
+                        #expect(operation == .closeWritableSegment)
+                        #expect(url.lastPathComponent == "log.000001.ndjson")
+                    default:
+                        Issue.record("unexpected append error: \(error)")
+                    }
+                } catch {
+                    Issue.record("unexpected non-FileLogStoreError: \(error)")
+                }
+            }
+        )
+
+        // log.000002 already exists as the post-rotation active
+        // segment but holds no admitted bytes — envelope 2 never
+        // reached storage because rotation projected close failure
+        // before the write step.
+        let segment1 = directory.appendingPathComponent("log.000001.ndjson")
+        let segment2 = directory.appendingPathComponent("log.000002.ndjson")
+        #expect(FileManager.default.fileExists(atPath: segment2.path))
+        #expect(try Data(contentsOf: segment2).isEmpty)
+
+        // Recovery: a follow-up append writes envelope 3's canonical
+        // bytes into log.000002 — the post-failure active state is
+        // deterministic and reusable.
+        try await store.append(envelope3)
+        try await store.flush()
+        #expect(try Data(contentsOf: segment2) == encoded3)
+
+        // The pre-rotation segment retains envelope 1's canonical
+        // bytes byte-for-byte; the failed close did not mutate it.
+        #expect(try Data(contentsOf: segment1) == encoded1)
+    }
+
+    /// Runs `body` with a rotated-close seam handler installed and
+    /// clears the seam before returning, even when `body` throws.
+    private static func withRotatedSegmentCloseSeam(
+        on store: FileLogStore,
+        handler: @Sendable @escaping (URL) throws -> Void,
+        body: () async throws -> Void
+    ) async throws {
+        await store._setOnBeforeRotatedSegmentCloseForTesting(handler)
+        var capturedError: (any Error)?
+        do {
+            try await body()
+        } catch {
+            capturedError = error
+        }
+        await store._setOnBeforeRotatedSegmentCloseForTesting(nil)
+        if let capturedError { throw capturedError }
+    }
 }
+
+// swiftlint:enable type_body_length

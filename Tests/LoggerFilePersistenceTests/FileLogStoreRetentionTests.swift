@@ -1,5 +1,6 @@
 // swiftlint:disable file_length - LOCKED retention SQE matrix; kept in one file for traceability.
 
+import Darwin
 import Foundation
 import LoggerPersistenceTestSupport
 import Testing
@@ -91,6 +92,45 @@ struct FileLogStoreRetentionTests {
             handler: handler,
             body: body
         )
+    }
+
+    /// Runs `body` with the retention clock pinned to a deterministic
+    /// synthetic `now` so age decisions never depend on real-time
+    /// sleep. Clears the clock seam before returning, even when
+    /// `body` throws.
+    static func withRetentionNow(
+        on store: FileLogStore,
+        setTo date: Date,
+        body: () async throws -> Void
+    ) async throws {
+        await store._setNowForRetentionTesting { date }
+        var capturedError: (any Error)?
+        do {
+            try await body()
+        } catch {
+            capturedError = error
+        }
+        await store._setNowForRetentionTesting(nil)
+        if let capturedError { throw capturedError }
+    }
+
+    /// Pins a file's modification time so age decisions are
+    /// deterministic without real-time sleep.
+    static func setMtime(of url: URL, secondsSinceEpoch: TimeInterval) throws {
+        let whole = floor(secondsSinceEpoch)
+        var spec = timespec()
+        spec.tv_sec = time_t(whole)
+        spec.tv_nsec = Int((secondsSinceEpoch - whole) * 1_000_000_000)
+        // utimensat reads two timespecs in `[atime, mtime]` order;
+        // pin both to the same instant so the file's access time
+        // matches its modification time.
+        let times: [timespec] = [spec, spec]
+        let result = times.withUnsafeBufferPointer { buffer in
+            url.path.withCString { cPath in
+                utimensat(AT_FDCWD, cPath, buffer.baseAddress, 0)
+            }
+        }
+        try #require(result == 0)
     }
 }
 
@@ -830,5 +870,437 @@ extension FileLogStoreRetentionTests {
         let originalPathNames = try Self.rotatedSegmentNames(in: originalDirectory)
         #expect(renamedNames == ["log.000002.ndjson"])
         #expect(originalPathNames.isEmpty)
+    }
+}
+
+// MARK: - .maxAge validation
+
+extension FileLogStoreRetentionTests {
+    @Test(
+        "`RetentionPolicy.maxAge` rejects a non-positive seconds bound",
+        .tags(.lgp2, .lgp7)
+    )
+    func maxAgeRejectsNonPositiveSeconds() {
+        do {
+            _ = try RetentionPolicy.maxAge(seconds: 0)
+            Issue.record("expected .invalidRetentionPolicy for seconds = 0")
+        } catch {
+            #expect(error == .invalidRetentionPolicy)
+        }
+        do {
+            _ = try RetentionPolicy.maxAge(seconds: -1)
+            Issue.record("expected .invalidRetentionPolicy for negative seconds")
+        } catch {
+            #expect(error == .invalidRetentionPolicy)
+        }
+    }
+
+    @Test(
+        "`RetentionPolicy.maxAge` accepts a seconds bound of one",
+        .tags(.lgp7)
+    )
+    func maxAgeAcceptsOneSecond() throws {
+        _ = try RetentionPolicy.maxAge(seconds: 1)
+    }
+}
+
+// MARK: - .bySize maxAge enforcement
+
+extension FileLogStoreRetentionTests {
+    @Test(
+        "`.bySize` `.maxAge` deletes rotated segments older than the cap",
+        .tags(.lgp7, .lgp25)
+    )
+    func bySizeMaxAgeDeletesExpiredRotatedSegments() async throws {
+        let directory = Self.uniqueDirectory()
+        defer { FileLogStoreTestSupport.remove(directory) }
+        let store = try Self.makeRotatingStore(
+            directory: directory,
+            retention: try .maxAge(seconds: 60)
+        )
+        // Three rotated segments + one active after sequence 4.
+        for sequence: UInt64 in 1 ... 4 {
+            try await store.append(
+                FileLogStoreTestSupport.makeEnvelope(sequence: sequence)
+            )
+        }
+        // Pin synthetic mtimes: segments 1+2 are far past the cap,
+        // segment 3 is fresh, segment 4 is active.
+        let baseline: TimeInterval = 1_700_000_000
+        let urls = (1 ... 4).map {
+            SegmentEnumeration.rotatedSegmentURL(
+                in: directory, sequence: UInt64($0)
+            )
+        }
+        try Self.setMtime(of: urls[0], secondsSinceEpoch: baseline)
+        try Self.setMtime(of: urls[1], secondsSinceEpoch: baseline + 5)
+        try Self.setMtime(of: urls[2], secondsSinceEpoch: baseline + 590)
+        try Self.setMtime(of: urls[3], secondsSinceEpoch: baseline + 590)
+
+        try await Self.withRetentionNow(
+            on: store,
+            setTo: Date(timeIntervalSince1970: baseline + 600)
+        ) {
+            // Fifth append triggers retention under the pinned clock.
+            try await store.append(
+                FileLogStoreTestSupport.makeEnvelope(sequence: 5)
+            )
+            try await store.flush()
+        }
+        let names = try Self.rotatedSegmentNames(in: directory)
+        #expect(names == ["log.000003.ndjson", "log.000004.ndjson", "log.000005.ndjson"])
+    }
+
+    @Test(
+        "`.bySize` `.maxAge` keeps every rotated segment when none is expired",
+        .tags(.lgp7, .lgp25)
+    )
+    func bySizeMaxAgeKeepsAllWhenNoneExpired() async throws {
+        let directory = Self.uniqueDirectory()
+        defer { FileLogStoreTestSupport.remove(directory) }
+        let store = try Self.makeRotatingStore(
+            directory: directory,
+            retention: try .maxAge(seconds: 3600)
+        )
+        for sequence: UInt64 in 1 ... 3 {
+            try await store.append(
+                FileLogStoreTestSupport.makeEnvelope(sequence: sequence)
+            )
+        }
+        let baseline: TimeInterval = 1_700_000_000
+        for sequence in 1 ... 3 {
+            let url = SegmentEnumeration.rotatedSegmentURL(
+                in: directory, sequence: UInt64(sequence)
+            )
+            try Self.setMtime(of: url, secondsSinceEpoch: baseline + 10)
+        }
+        try await Self.withRetentionNow(
+            on: store,
+            setTo: Date(timeIntervalSince1970: baseline + 20)
+        ) {
+            try await store.append(
+                FileLogStoreTestSupport.makeEnvelope(sequence: 4)
+            )
+            try await store.flush()
+        }
+        let names = try Self.rotatedSegmentNames(in: directory)
+        #expect(names == [
+            "log.000001.ndjson",
+            "log.000002.ndjson",
+            "log.000003.ndjson",
+            "log.000004.ndjson"
+        ])
+    }
+
+    @Test(
+        "`.bySize` `.maxAge` deletes at the `now - mtime == maxAge` boundary",
+        .tags(.lgp7, .lgp25)
+    )
+    func bySizeMaxAgeDeletesAtBoundary() async throws {
+        let directory = Self.uniqueDirectory()
+        defer { FileLogStoreTestSupport.remove(directory) }
+        let store = try Self.makeRotatingStore(
+            directory: directory,
+            retention: try .maxAge(seconds: 60)
+        )
+        try await store.append(
+            FileLogStoreTestSupport.makeEnvelope(sequence: 1)
+        )
+        try await store.append(
+            FileLogStoreTestSupport.makeEnvelope(sequence: 2)
+        )
+        let baseline: TimeInterval = 1_700_000_000
+        let first = SegmentEnumeration.rotatedSegmentURL(
+            in: directory, sequence: 1
+        )
+        try Self.setMtime(of: first, secondsSinceEpoch: baseline)
+        // Active log.000002 stays at its real mtime; advance clock
+        // by exactly `maxAge` from the pinned first-segment mtime.
+        try await Self.withRetentionNow(
+            on: store,
+            setTo: Date(timeIntervalSince1970: baseline + 60)
+        ) {
+            try await store.append(
+                FileLogStoreTestSupport.makeEnvelope(sequence: 3)
+            )
+            try await store.flush()
+        }
+        let names = try Self.rotatedSegmentNames(in: directory)
+        #expect(names == ["log.000002.ndjson", "log.000003.ndjson"])
+    }
+
+    @Test(
+        "`.bySize` `.maxAge` never deletes the active writer segment",
+        .tags(.lgp7, .lgp25)
+    )
+    func bySizeMaxAgeNeverDeletesActive() async throws {
+        let directory = Self.uniqueDirectory()
+        defer { FileLogStoreTestSupport.remove(directory) }
+        let store = try Self.makeRotatingStore(
+            directory: directory,
+            retention: try .maxAge(seconds: 60)
+        )
+        try await store.append(
+            FileLogStoreTestSupport.makeEnvelope(sequence: 1)
+        )
+        let firstURL = SegmentEnumeration.rotatedSegmentURL(
+            in: directory, sequence: 1
+        )
+        let baseline: TimeInterval = 1_700_000_000
+        try Self.setMtime(of: firstURL, secondsSinceEpoch: baseline)
+        // Pin `now` far in the future so the new active segment's
+        // real `mtime` from this run also satisfies the age
+        // predicate. Both rotated segments are then age-eligible
+        // by construction; only the active-segment exemption can
+        // explain log.000002 surviving.
+        try await Self.withRetentionNow(
+            on: store,
+            setTo: Date(timeIntervalSince1970: baseline + 1_000_000_000)
+        ) {
+            try await store.append(
+                FileLogStoreTestSupport.makeEnvelope(sequence: 2)
+            )
+            try await store.flush()
+        }
+        let names = try Self.rotatedSegmentNames(in: directory)
+        #expect(names == ["log.000002.ndjson"])
+    }
+
+    @Test(
+        "`.never` rotation with `.maxAge` does not delete the active `log.ndjson`",
+        .tags(.lgp7, .lgp25)
+    )
+    func neverRotationWithMaxAgeIsNoOp() async throws {
+        let directory = Self.uniqueDirectory()
+        defer { FileLogStoreTestSupport.remove(directory) }
+        let store = FileLogStore(
+            configuration: .init(
+                directory: directory,
+                rotation: .never,
+                retention: try .maxAge(seconds: 1)
+            )
+        )
+        let encoder = CanonicalEnvelopeLineEncoder()
+        let envelope1 = try FileLogStoreTestSupport.makeEnvelope(sequence: 1)
+        let envelope2 = try FileLogStoreTestSupport.makeEnvelope(sequence: 2)
+        let expectedBytes = try encoder.encode(envelope1)
+            + encoder.encode(envelope2)
+
+        try await store.append(envelope1)
+        try await store.flush()
+        let active = directory.appendingPathComponent("log.ndjson")
+        let baseline: TimeInterval = 1_700_000_000
+        try Self.setMtime(of: active, secondsSinceEpoch: baseline)
+        try await Self.withRetentionNow(
+            on: store,
+            setTo: Date(timeIntervalSince1970: baseline + 10000)
+        ) {
+            try await store.append(envelope2)
+            try await store.flush()
+        }
+        #expect(FileManager.default.fileExists(atPath: active.path))
+        #expect(try Data(contentsOf: active) == expectedBytes)
+        let names = try Self.rotatedSegmentNames(in: directory)
+        #expect(names.isEmpty)
+    }
+}
+
+// MARK: - .maxAge failure injection + admission
+
+extension FileLogStoreRetentionTests {
+    @Test(
+        "`.maxAge` injected unlink failure surfaces .operationFailed(.enforceRetention) and preserves admission",
+        .tags(.lgp2, .lgp7)
+    )
+    func maxAgeInjectedUnlinkFailureSurfacesEnforceRetentionError() async throws {
+        let directory = Self.uniqueDirectory()
+        try Self.makeDirectory(directory)
+        defer { FileLogStoreTestSupport.remove(directory) }
+        let store = try Self.makeRotatingStore(
+            directory: directory,
+            retention: try .maxAge(seconds: 60)
+        )
+        try await store.append(
+            FileLogStoreTestSupport.makeEnvelope(sequence: 1)
+        )
+        let first = SegmentEnumeration.rotatedSegmentURL(
+            in: directory, sequence: 1
+        )
+        let baseline: TimeInterval = 1_700_000_000
+        try Self.setMtime(of: first, secondsSinceEpoch: baseline)
+        struct InjectedRetentionError: Error, Equatable {}
+        try await Self.withRetentionNow(
+            on: store,
+            setTo: Date(timeIntervalSince1970: baseline + 600)
+        ) {
+            try await Self.withRetentionUnlinkSeam(
+                on: store,
+                handler: { _ in throw InjectedRetentionError() },
+                body: {
+                    do {
+                        try await store.append(
+                            FileLogStoreTestSupport.makeEnvelope(sequence: 2)
+                        )
+                        Issue.record("expected .operationFailed(.enforceRetention)")
+                    } catch let error as FileLogStoreError {
+                        switch error {
+                        case let .operationFailed(operation, url, _):
+                            #expect(operation == .enforceRetention)
+                            #expect(url.lastPathComponent == "log.000001.ndjson")
+                        default:
+                            Issue.record("unexpected append error: \(error)")
+                        }
+                    } catch {
+                        Issue.record("unexpected non-FileLogStoreError: \(error)")
+                    }
+                }
+            )
+        }
+
+        // Triggering append is admitted and the failed-unlink
+        // segment is still present.
+        #expect(FileManager.default.fileExists(atPath: first.path))
+        #expect(try Data(contentsOf: first) == (try Self.encodedLine(for: 1)))
+        let second = SegmentEnumeration.rotatedSegmentURL(
+            in: directory, sequence: 2
+        )
+        #expect(try Data(contentsOf: second) == (try Self.encodedLine(for: 2)))
+    }
+}
+
+// MARK: - .maxAge candidate revalidation (symlink swap)
+
+extension FileLogStoreRetentionTests {
+    // swiftlint:disable function_body_length
+    // Reason: The `.maxAge` TOCTOU proof co-locates clock+mtime pinning, retention/seam wiring, the planted symlink swap, the typed-error catch, and the four post-failure topology assertions per RetentionPolicySQECoverage.md so the candidate-revalidation contract stays auditable in one body.
+
+    @Test(
+        "`.maxAge` candidate swapped to a symlink between seam and unlink fails closed",
+        .tags(.lgp2, .lgp7)
+    )
+    func maxAgeSymlinkSwapBetweenSeamAndUnlinkFailsClosed() async throws {
+        let directory = Self.uniqueDirectory()
+        try Self.makeDirectory(directory)
+        defer { FileLogStoreTestSupport.remove(directory) }
+
+        let symlinkTargetParent = Self.uniqueDirectory()
+        try Self.makeDirectory(symlinkTargetParent)
+        defer { FileLogStoreTestSupport.remove(symlinkTargetParent) }
+        let symlinkTarget = symlinkTargetParent.appendingPathComponent("target.bin")
+        let targetBytes = Data([0xCA, 0xFE, 0xBA, 0xBE])
+        try targetBytes.write(to: symlinkTarget)
+
+        let store = try Self.makeRotatingStore(
+            directory: directory,
+            retention: try .maxAge(seconds: 60)
+        )
+        try await store.append(
+            FileLogStoreTestSupport.makeEnvelope(sequence: 1)
+        )
+        let first = SegmentEnumeration.rotatedSegmentURL(
+            in: directory, sequence: 1
+        )
+        let baseline: TimeInterval = 1_700_000_000
+        try Self.setMtime(of: first, secondsSinceEpoch: baseline)
+
+        try await Self.withRetentionNow(
+            on: store,
+            setTo: Date(timeIntervalSince1970: baseline + 600)
+        ) {
+            try await Self.withRetentionUnlinkSeam(
+                on: store,
+                handler: { candidateURL in
+                    try FileManager.default.removeItem(at: candidateURL)
+                    try FileManager.default.createSymbolicLink(
+                        at: candidateURL, withDestinationURL: symlinkTarget
+                    )
+                },
+                body: {
+                    do {
+                        try await store.append(
+                            FileLogStoreTestSupport.makeEnvelope(sequence: 2)
+                        )
+                        Issue.record("expected .operationFailed(.enforceRetention) for symlink swap")
+                    } catch let error as FileLogStoreError {
+                        switch error {
+                        case let .operationFailed(operation, url, _):
+                            #expect(operation == .enforceRetention)
+                            #expect(url.lastPathComponent == "log.000001.ndjson")
+                        default:
+                            Issue.record("unexpected append error: \(error)")
+                        }
+                    } catch {
+                        Issue.record("unexpected non-FileLogStoreError: \(error)")
+                    }
+                }
+            )
+        }
+
+        // Triggering append is admitted in the new active.
+        let second = SegmentEnumeration.rotatedSegmentURL(
+            in: directory, sequence: 2
+        )
+        #expect(try Data(contentsOf: second) == (try Self.encodedLine(for: 2)))
+
+        // Planted symlink stays in place, retention did not follow it.
+        #expect(
+            try FileManager.default.attributesOfItem(atPath: first.path)[.type]
+                as? FileAttributeType == .typeSymbolicLink
+        )
+        let resolved = try FileManager.default.destinationOfSymbolicLink(
+            atPath: first.path
+        )
+        #expect(resolved == symlinkTarget.path)
+        #expect(try Data(contentsOf: symlinkTarget) == targetBytes)
+    }
+
+    // swiftlint:enable function_body_length
+}
+
+// MARK: - .maxAge export / remove stability
+
+extension FileLogStoreRetentionTests {
+    @Test(
+        "`.maxAge` retention does not invalidate a still-valid removal boundary",
+        .tags(.lgp7, .lgp8, .lgp9)
+    )
+    func maxAgeKeepsRemovalBoundaryValidWhenRetainedSegmentSurvives() async throws {
+        let directory = Self.uniqueDirectory()
+        try Self.makeDirectory(directory)
+        defer { FileLogStoreTestSupport.remove(directory) }
+        let store = try Self.makeRotatingStore(
+            directory: directory,
+            retention: try .maxAge(seconds: 60)
+        )
+        try await store.append(
+            FileLogStoreTestSupport.makeEnvelope(sequence: 1)
+        )
+        // Export captures the boundary referencing log.000001.
+        let destination = try Self.makeUniqueDestination()
+        defer { FileLogStoreTestSupport.remove(destination.parent) }
+        try await store.exportLogs(to: destination.destination)
+
+        // Pin clock so age retention does not consider log.000001
+        // expired; the next append rotates but does not delete the
+        // exported segment.
+        let baseline: TimeInterval = 1_700_000_000
+        let first = SegmentEnumeration.rotatedSegmentURL(
+            in: directory, sequence: 1
+        )
+        try Self.setMtime(of: first, secondsSinceEpoch: baseline + 30)
+        try await Self.withRetentionNow(
+            on: store,
+            setTo: Date(timeIntervalSince1970: baseline + 40)
+        ) {
+            try await store.append(
+                FileLogStoreTestSupport.makeEnvelope(sequence: 2)
+            )
+            try await store.flush()
+        }
+
+        // Retention left log.000001 in place, so removeExportedLogs
+        // can still consume the boundary.
+        try await store.removeExportedLogs()
+        #expect(!FileManager.default.fileExists(atPath: first.path))
     }
 }

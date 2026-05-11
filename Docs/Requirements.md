@@ -104,8 +104,8 @@ status is tracked by roadmap and coverage documents.
   `Decisions/0002-envelope-storage.md`.
 - **File store lifecycle.** Current export, remove, and retention
   details live in `APIDesign.md`; `ExportAndRemoveDesign.md` tracks
-  non-normative export/remove/retention design notes (count/byte
-  retention shipped; age-based retention deferred).
+  non-normative export/remove/retention design notes
+  (count-, byte-, and age-based retention shipped).
 - **Recoverable prefix / accepted bytes / replay identity.** The
   normative contract lives in `FileFormatSpec.md`.
 - **Parser and corpus governance.** Corpus categories live in
