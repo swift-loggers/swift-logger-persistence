@@ -1,12 +1,14 @@
 # Corpus Spec
 
 Conformance-corpus fixture plan for `swift-logger-persistence`.
-`FileFormatSpec.md` defines the normative corpus categories; this file
-keeps the detailed fixture candidates out of the main wire-format spec.
+[`FileFormatSpec.md`](FileFormatSpec.md) defines the normative corpus
+categories; this file keeps the detailed fixture candidates out of
+the main wire-format spec.
 
 Fixture bytes are immutable once released within a package major
 version. Fixture ordering is non-semantic and does not define
-accepted ordering unless explicitly stated otherwise.
+accepted ordering for replay/export behavior unless explicitly stated
+otherwise.
 
 ## Corruption Fixtures
 
@@ -63,7 +65,7 @@ accepted ordering unless explicitly stated otherwise.
 - trailing partial line
 - mixed valid/corrupt interior lines
 - any additional corruption class introduced by the package
-  compatibility contract
+  compatibility contract must add corresponding corpus fixtures
 
 ## Semantic Validation Fixtures
 
@@ -72,7 +74,8 @@ accepted ordering unless explicitly stated otherwise.
 - uppercase UUID text
 - mixed lowercase/uppercase UUID text
 - unhyphenated, braced, or `urn:uuid:` UUID spellings
-- invalid RFC 3339 millisecond timestamp precision
+- invalid RFC 3339 millisecond timestamp precision, including missing
+  or excess fractional precision
 
 ## Deterministic Encoding Fixtures
 
@@ -82,6 +85,7 @@ accepted ordering unless explicitly stated otherwise.
 - canonical vs non-canonical exponent forms
 - malformed exponent sign spelling
 - malformed canonical exponent spelling
+- negative zero canonicalization
 
 ### Key Ordering
 
@@ -107,7 +111,8 @@ accepted ordering unless explicitly stated otherwise.
 - recursive Unicode escape ordering
 - mixed escaped/unescaped key ordering
 - escaped solidus ordering stability
-- Unicode escape canonicalization stability
+- Unicode escape canonicalization stability across
+  parser-profile-approved Foundation versions
 
 #### Insertion-Order Permutations
 
@@ -117,4 +122,4 @@ accepted ordering unless explicitly stated otherwise.
 
 ### Solidus Escaping
 
-- solidus escaping compatibility requirement
+- solidus escaping byte-stability requirement

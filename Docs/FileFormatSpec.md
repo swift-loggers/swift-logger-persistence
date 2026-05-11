@@ -1,8 +1,8 @@
 # File Format Spec
 
 Normative wire-format and corruption contract for package-provided
-file-backed stores. `APIDesign.md` owns the Swift API;
-this document owns the portable on-disk profile for stores and
+file-backed stores. [`APIDesign.md`](APIDesign.md) owns the Swift
+API; this document owns the portable on-disk profile for stores and
 package-provided export behavior and future replay behavior.
 
 This document is the single normative source for the persistence contract;
@@ -439,12 +439,13 @@ accepted prefix and corruption boundary as structured data.
 ### Byte-Stable Export
 
 Export MUST preserve accepted ordering for the selected export range
-defined by a higher storage/API layer such as the `APIDesign.md` export
-boundary, independent of filesystem enumeration order or segment naming,
-and reproduce selected accepted bytes exactly. It MUST NOT synthesize
-new canonical bytes or decode and re-encode a decoded-equivalent
-envelope.
-Export never rewrites LF delimiter ownership.
+defined by a higher storage/API layer such as the
+[`APIDesign.md`](APIDesign.md) export boundary, independent of
+filesystem enumeration order or segment naming,
+and reproduce selected accepted bytes exactly, including LF delimiters.
+It MUST NOT synthesize new canonical bytes or decode and re-encode a
+decoded-equivalent envelope. LF delimiters are part of the selected
+accepted bytes.
 
 ### Logical Export
 
@@ -516,7 +517,7 @@ corpus MUST cover at least these fixture categories:
 - mixed recovery
 - canonical key-ordering fixtures
 
-Detailed fixture candidates live in `CorpusSpec.md`.
+Detailed fixture candidates live in [`CorpusSpec.md`](CorpusSpec.md).
 
 ## Operational Notes
 

@@ -32,28 +32,32 @@ jobs:
       - uses: dorny/paths-filter@v3
         id: filter
         with:
-          # Two filters so a `Docs/**`-only PR triggers the DocC
-          # gate (and only the DocC gate). Workflow files appear in
-          # both filters because they can affect either pipeline.
+          # Two filters so docs-only PRs trigger the DocC gate
+          # while code/config PRs trigger the full pipeline.
+          # GitHub config appears in both filters because it can
+          # affect either pipeline.
           filters: |
             code_relevant:
               - 'Package.swift'
               - 'Package.resolved'
+              - 'Scripts/**'
               - 'Sources/**'
               - 'Tests/**'
-              - '.github/workflows/**'
+              - '.github/**'
               - '.swiftformat'
               - '.swiftlint.yml'
               - '.swift-version'
               - '.periphery.yml'
             docs_relevant:
+              - 'README.md'
+              - 'SECURITY.md'
               - 'Docs/**'
-              - '.github/workflows/**'
+              - '.github/**'
 
   lint:
     name: Lint
     needs: changes
-    if: needs.changes.outputs.code_relevant == 'true' || github.event.action == 'ready_for_review'
+    if: needs.changes.outputs.code_relevant == 'true'
     runs-on: macos-latest
     timeout-minutes: 10
     steps:
@@ -98,10 +102,36 @@ jobs:
             git diff --check "${{ github.event.before }}" "${{ github.sha }}"
           fi
 
+      # Guard against array materialization in the duplicate-member
+      # scanner: the production walker must walk `Data` directly.
+      # Any `Array(...)` construction in this file would defeat
+      # memory-bounded scanning on rotation-cap-sized lines.
+      - name: Guard JSONDuplicateMemberScanner has no full-buffer copy
+        shell: bash
+        run: |
+          if grep -nE '\b(Swift\.)?Array(\s*<[^>]+>)?\s*\(' \
+            Sources/LoggerFilePersistence/JSONDuplicateMemberScanner.swift; then
+            echo "JSONDuplicateMemberScanner.swift must not construct Array values; walk Data directly." >&2
+            exit 1
+          fi
+
+      # Guard against `FileHandle(forUpdating:)` anywhere in
+      # LoggerFilePersistence source. Writer and lifecycle file paths
+      # must go through package-owned descriptor APIs (`open(2)`,
+      # `O_NOFOLLOW`, and `fstat`) so symlink-final-component TOCTOU
+      # windows stay closed.
+      - name: Guard LoggerFilePersistence does not use FileHandle(forUpdating:)
+        shell: bash
+        run: |
+          if grep -rn 'FileHandle(forUpdating:' Sources/LoggerFilePersistence; then
+            echo "LoggerFilePersistence source must not use FileHandle(forUpdating:); use package-owned descriptor paths." >&2
+            exit 1
+          fi
+
   test:
     name: Test (strict concurrency)
     needs: changes
-    if: needs.changes.outputs.code_relevant == 'true' || github.event.action == 'ready_for_review'
+    if: needs.changes.outputs.code_relevant == 'true'
     runs-on: macos-latest
     timeout-minutes: 10
     steps:
@@ -118,7 +148,7 @@ jobs:
   build-release:
     name: Build (release)
     needs: changes
-    if: needs.changes.outputs.code_relevant == 'true' || github.event.action == 'ready_for_review'
+    if: needs.changes.outputs.code_relevant == 'true'
     runs-on: macos-latest
     timeout-minutes: 10
     steps:
@@ -135,7 +165,7 @@ jobs:
   periphery:
     name: Periphery (unused code)
     needs: changes
-    if: needs.changes.outputs.code_relevant == 'true' || github.event.action == 'ready_for_review'
+    if: needs.changes.outputs.code_relevant == 'true'
     runs-on: macos-latest
     timeout-minutes: 10
     steps:
@@ -158,7 +188,7 @@ jobs:
   library-evolution:
     name: Build (library evolution)
     needs: changes
-    if: needs.changes.outputs.code_relevant == 'true' || github.event.action == 'ready_for_review'
+    if: needs.changes.outputs.code_relevant == 'true'
     runs-on: macos-latest
     timeout-minutes: 10
     steps:
@@ -172,6 +202,23 @@ jobs:
       - name: Build with library evolution
         run: swift build -Xswiftc -enable-library-evolution -Xswiftc -emit-module-interface -Xswiftc -warnings-as-errors
 
+  spm-consumer-smoke:
+    name: SwiftPM consumer smoke
+    needs: changes
+    if: needs.changes.outputs.code_relevant == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tool versions
+        run: |
+          swift --version
+          xcodebuild -version
+
+      - name: Build external consumer fixture
+        run: Scripts/smoke-spm-consumer.sh "$GITHUB_WORKSPACE"
+
   docc:
     name: DocC (${{ matrix.product }})
     needs: changes
@@ -184,7 +231,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        product: [LoggerPersistence]
+        product: [LoggerPersistence, LoggerFilePersistence]
     steps:
       - uses: actions/checkout@v4
 
