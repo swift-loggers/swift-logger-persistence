@@ -49,9 +49,9 @@ This policy applies to:
 
 ### Format-Owned Contracts
 
-- `FileFormatSpec.md` owns replay identity, accepted bytes, accepted
-  ordering, recoverable visibility, recoverable prefix discovery, and
-  append cardinality.
+- [`FileFormatSpec.md`](FileFormatSpec.md) owns replay identity,
+  accepted bytes, accepted ordering, recoverable visibility,
+  recoverable prefix discovery, and append cardinality.
 - Changing replay identity, accepted bytes, accepted ordering,
   recoverable visibility, recoverable prefix discovery, or append
   cardinality without versioning is compatibility-breaking.
@@ -89,4 +89,4 @@ persisted or exported compatibility surface and must not drive long-term
 compatibility logic.
 
 Testing guidance for platform diagnostic text lives in
-`TestingGuidance.md`.
+[`TestingGuidance.md`](TestingGuidance.md).

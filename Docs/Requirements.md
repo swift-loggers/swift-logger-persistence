@@ -29,9 +29,9 @@ status is tracked by roadmap and coverage documents.
 
 | ID | Requirement | Target |
 | --- | --- | --- |
-| LGP-10 | Recoverable visibility is the durability boundary. | M3.3.0 |
+| LGP-10 | Recoverable visibility is the persistence contract boundary. | M3.3.0 |
 | LGP-11 | Successful admission extends accepted ordering. | M3.3.0 |
-| LGP-12 | Flush contract follows `FileFormatSpec.md`. | M3.3.0 |
+| LGP-12 | Flush contract follows [`FileFormatSpec.md`](FileFormatSpec.md). | M3.3.0 |
 | LGP-13 | Rejected envelopes never mutate recoverable visibility. | M3.3.0 |
 | LGP-14 | Bytes beyond the recoverable prefix are non-authoritative for replay/export. | M3.3.0 |
 | LGP-15 | Undefined suffix bytes never enter recoverable visibility. | M3.3.0 |
@@ -52,7 +52,7 @@ status is tracked by roadmap and coverage documents.
 | LGP-25 | Admission is the storage mutation boundary. | M3.3.0 |
 | LGP-26 | LF delimiter ownership is append-local. | M3.3.0 |
 | LGP-27 | Accepted bytes, including delimiters, are preserved byte-for-byte. | M3.3.0 |
-| LGP-28 | Payload opacity follows `FileFormatSpec.md`. | M3.3.0 |
+| LGP-28 | Payload opacity follows [`FileFormatSpec.md`](FileFormatSpec.md). | M3.3.0 |
 | LGP-29 | Canonical UUID spelling is a compatibility contract. | M3.3.0 |
 
 ## Replay, Export, And Parser Governance
@@ -67,8 +67,8 @@ status is tracked by roadmap and coverage documents.
 
 | ID | Requirement | Target |
 | --- | --- | --- |
-| LGP-31 | Replay identity follows `FileFormatSpec.md`. | M3.3.0 |
-| LGP-32 | Byte-stable export follows `FileFormatSpec.md`. | M3.3.2 |
+| LGP-31 | Replay identity follows [`FileFormatSpec.md`](FileFormatSpec.md). | M3.3.0 |
+| LGP-32 | Byte-stable export follows [`FileFormatSpec.md`](FileFormatSpec.md). | M3.3.2 |
 
 ### Parser Governance
 
@@ -95,19 +95,32 @@ status is tracked by roadmap and coverage documents.
 
 | ID | Requirement | Target |
 | --- | --- | --- |
-| LGP-39 | Rotation preserves append cardinality and is not replay-visible. | M3.3.1 |
+| LGP-39 | Rotation preserves append cardinality and is not visible to current export behavior or future replay behavior. | M3.3.1 |
 
 ## Notes
 
-- **Core API.** See `Decisions/0004-ordering-model.md`,
-  `Decisions/0005-failure-model.md`, and
-  `Decisions/0002-envelope-storage.md`.
+- **Core API.** See
+  [`Decisions/0004-ordering-model.md`](Decisions/0004-ordering-model.md),
+  [`Decisions/0005-failure-model.md`](Decisions/0005-failure-model.md),
+  and [`Decisions/0002-envelope-storage.md`](Decisions/0002-envelope-storage.md).
 - **File store lifecycle.** Current export, remove, and retention
-  details live in `APIDesign.md`; `ExportAndRemoveDesign.md` tracks
+  details live in [`APIDesign.md`](APIDesign.md);
+  [`ExportAndRemoveDesign.md`](ExportAndRemoveDesign.md) tracks
   non-normative export/remove/retention design notes
   (count-, byte-, and age-based retention shipped).
 - **Recoverable prefix / accepted bytes / replay identity.** The
-  normative contract lives in `FileFormatSpec.md`.
+  normative contract lives in [`FileFormatSpec.md`](FileFormatSpec.md).
 - **Parser and corpus governance.** Corpus categories live in
-  `FileFormatSpec.md`; detailed fixture candidates live in
-  `CorpusSpec.md`.
+  [`FileFormatSpec.md`](FileFormatSpec.md); detailed fixture
+  candidates live in [`CorpusSpec.md`](CorpusSpec.md).
+- **Path confinement.** The file-store opens
+  `FileLogStore.Configuration.directory` once and operates
+  descriptor-relative against the held root; the final root
+  component and segment-entry opens use `O_NOFOLLOW`, while
+  descriptor-relative metadata reads use
+  `fstatat(..., AT_SYMLINK_NOFOLLOW)` for final path components. The
+  package does not validate, walk, or confine ancestor components of
+  the configured path;
+  ancestor ownership and confinement (chroot, sandboxing, ancestor
+  realpath validation) are explicit caller responsibilities. See
+  [`APIDesign.md`](APIDesign.md) for the full contract.

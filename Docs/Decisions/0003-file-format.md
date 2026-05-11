@@ -36,7 +36,7 @@ the payload is itself JSON.
   profiling at scale shows the base64 path is meaningfully expensive;
   not required for M3.3.x.
 - **SQLite-backed store.** Acknowledged as a future option; the
-  package split (see `0001-package-split.md`) keeps it possible
+  package split (see [`0001-package-split.md`](0001-package-split.md)) keeps it possible
   without locking the public API to a file format. Portable
   interchange would become engine-defined. Out of scope for M3.3.x.
 - **Mixed inline/base64 payload representations.** Rejected explicitly:
@@ -47,4 +47,5 @@ the payload is itself JSON.
 ## Notes
 
 Normative contract and compatibility authority live in
-`../FileFormatSpec.md`; ADR wording is rationale-only.
+[`../FileFormatSpec.md`](../FileFormatSpec.md); ADR wording is
+rationale-only.

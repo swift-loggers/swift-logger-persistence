@@ -38,8 +38,8 @@ event.
 
 - The recommended path for record-based producers is
   `LogRecordPersistentEncoder`, which owns the counter.
-- Producers that build envelopes themselves (the M3.4 remote-delivery
-  queue, custom test fixtures) are responsible for monotonic
+- Producers that build envelopes themselves (the future M3.4
+  remote-delivery queue, custom test fixtures) are responsible for monotonic
   sequence ordering on their side. The store's protocol comment
   documents this expectation.
 - Tests assert deterministic sequence ordering across concurrent
@@ -49,7 +49,7 @@ event.
   asserting equality with the expected range.
 - Flush observes store serialization order, not wall-clock invocation
   order. Concurrent append/flush callers must not treat invocation order
-  as a durability guarantee.
+  as a persistence guarantee.
 
 ## Alternatives considered
 
@@ -60,4 +60,5 @@ event.
   does not express producer event order and breaks under concurrent
   writer topologies. Sequence is producer ordering metadata for logical
   consumers such as the future remote-delivery queue; byte-stable export
-  ordering is owned by `../FileFormatSpec.md`.
+  ordering is owned by [`../FileFormatSpec.md`](../FileFormatSpec.md),
+  not this ADR.

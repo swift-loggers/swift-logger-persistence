@@ -26,8 +26,9 @@ M3.3.0 establishes the local persistence API surface and storage model.
 
 ### Boundaries for later work
 
-Deferred APIs and roadmap sequencing live in `README.md` and
-`ExportAndRemoveDesign.md`.
+Deferred APIs and roadmap sequencing live in
+[`README.md`](../README.md) and
+[`ExportAndRemoveDesign.md`](ExportAndRemoveDesign.md).
 
 ## Non-goals
 
@@ -39,13 +40,13 @@ Deferred APIs and roadmap sequencing live in `README.md` and
 
 ## Layering
 
-- API layer: `APIDesign.md`.
-- Format/spec layer: `FileFormatSpec.md`.
-- Compatibility layer: `APICompatibility.md`.
+- API layer: [`APIDesign.md`](APIDesign.md).
+- Format/spec layer: [`FileFormatSpec.md`](FileFormatSpec.md).
+- Compatibility layer: [`APICompatibility.md`](APICompatibility.md).
 - Implementation layer: `Sources/` and `Tests/`.
 
 For persistence contract, the format/spec layer outranks API prose; on
-conflict, `FileFormatSpec.md` prevails.
+conflict, [`FileFormatSpec.md`](FileFormatSpec.md) prevails.
 
 ## Package & product split
 
@@ -56,7 +57,7 @@ The package exposes two products:
 - `LoggerFilePersistence` -- file-backed implementation
   (`FileLogStore`, `FileLogStore.Configuration`).
 
-See `Decisions/0001-package-split.md`.
+See [`Decisions/0001-package-split.md`](Decisions/0001-package-split.md).
 
 ## Logical view
 
@@ -95,11 +96,12 @@ Ownership boundaries:
   enforcement are caller/platform responsibilities outside this
   package.
 - Replay file-format and byte-stable export contracts are defined in
-  `FileFormatSpec.md`, which remains the normative source.
+  [`FileFormatSpec.md`](FileFormatSpec.md), which remains the
+  normative source.
 - Stores preserve producer sequence metadata without assigning it.
 
-See `Decisions/0002-envelope-storage.md` and
-`Decisions/0004-ordering-model.md`.
+See [`Decisions/0002-envelope-storage.md`](Decisions/0002-envelope-storage.md)
+and [`Decisions/0004-ordering-model.md`](Decisions/0004-ordering-model.md).
 
 ## Failure model
 
@@ -110,4 +112,4 @@ Logger-facing adapters remain infallible by design. Adapter diagnostics
 are non-normative and non-authoritative, and adapter retry policy is
 outside the persistence contract and package scope; retry belongs to
 the upstream adapter/app layer. See
-`Decisions/0005-failure-model.md`.
+[`Decisions/0005-failure-model.md`](Decisions/0005-failure-model.md).

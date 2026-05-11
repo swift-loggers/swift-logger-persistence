@@ -1,19 +1,22 @@
-# API Design Draft
+# API Design
 
-This document is design input for M3.3. Public API is locked by accepted
-API/spec review, then verified by implementation and conformance tests.
+This document defines the API-observable contract surface for
+`swift-logger-persistence`. Public API is locked by accepted API/spec
+review, then verified by implementation and conformance tests.
 
 File-format and recoverability contract is defined in
-`FileFormatSpec.md`.
+[`FileFormatSpec.md`](FileFormatSpec.md).
 
-`APIDesign.md` owns API shape and API-observable guarantees only.
-`FileFormatSpec.md` owns persistence terminology and wire-format
-contract. `APICompatibility.md` owns public diagnostic evolution.
+[`APIDesign.md`](APIDesign.md) owns API shape and API-observable
+guarantees only. [`FileFormatSpec.md`](FileFormatSpec.md) owns
+persistence terminology and wire-format contract.
+[`APICompatibility.md`](APICompatibility.md) owns public diagnostic
+evolution.
 
 > **Snippet convention.** Code blocks in this document use text-tagged
 > code fences so the repo's local snippet runner skips them; some are
-> intentionally not standalone Swift. The implementation PR will add the
-> validated Swift API under `Sources/LoggerPersistence/` and
+> intentionally not standalone Swift. The shipped implementation lives
+> under `Sources/LoggerPersistence/` and
 > `Sources/LoggerFilePersistence/`.
 
 ## Envelope and store -- M3.3.0
@@ -41,13 +44,15 @@ public protocol PersistentLogStore: Sendable {
 }
 ```
 
-Terminology follows `FileFormatSpec.md`.
+Terminology follows [`FileFormatSpec.md`](FileFormatSpec.md).
 
 Envelope observable guarantees:
 
 - `id` identifies one envelope. It is not an ordering key.
-- Byte preservation terms are defined in `FileFormatSpec.md`.
-- Payload opacity terms are defined in `FileFormatSpec.md`.
+- Byte preservation terms are defined in
+  [`FileFormatSpec.md`](FileFormatSpec.md).
+- Payload opacity terms are defined in
+  [`FileFormatSpec.md`](FileFormatSpec.md).
 
 ## Record-aware encoder -- M3.3.0
 
@@ -198,6 +203,33 @@ Storage permissions:
   state (no `umask` mutation) and the writer-private contract
   does not depend on the process umask.
 
+Path confinement:
+
+- `FileLogStore.Configuration.directory` is the caller's contract:
+  the configured root URL is opened once, descriptor-relative, and
+  every later segment open, segment stat, segment rename, segment
+  unlink, and retention sweep runs against that held descriptor.
+  The store does not re-resolve the configured path mid-operation.
+- The final root component is opened with `O_NOFOLLOW`; a symlink
+  at the configured leaf is rejected up-front rather than followed.
+  Every segment-entry open uses `O_NOFOLLOW`; descriptor-relative
+  metadata reads use `fstatat(..., AT_SYMLINK_NOFOLLOW)` so a
+  symlink dropped into the directory cannot redirect writes, reads,
+  exports, or deletes.
+- The store does not validate, walk, or confine ancestor components
+  of the configured path. Any directory the caller can write to
+  through that path -- including paths that traverse caller-owned
+  symlinks above the configured root -- is admissible. Ancestor
+  ownership and resolution is the caller's responsibility; if the
+  caller hands the store a path that resolves through an actor with
+  write access on an ancestor, the store treats that path as if the
+  caller had handed it the final resolved location.
+- This is an explicit contract boundary, not an omission: the
+  package's confinement guarantees stop at the configured-root
+  descriptor and the leaf-relative `O_NOFOLLOW` open. Stricter
+  ancestor confinement (chroot, sandbox containment, ancestor
+  realpath validation) belongs in the caller's deployment layer.
+
 ## Byte-stable export -- M3.3.2
 
 `FileLogStore` exposes a concrete typed export method. The portable
@@ -205,7 +237,7 @@ Storage permissions:
 destructive remove lifecycle so the protocol does not need a later
 requirement addition.
 
-```swift
+```text
 public protocol ExportableLogStore: Sendable {
     func exportLogs(to url: URL) async throws
     func removeExportedLogs() async throws
@@ -229,7 +261,8 @@ For `operationFailed`, `url` is the operation-relevant URL; it is not
 always the final destination URL. For `interiorCorruption`,
 `segmentURL` identifies the scanned source segment, while `byteOffset`
 is the byte offset in the accepted-ordering export stream defined by
-`FileFormatSpec.md`, not a segment-local offset or a raw file
+[`FileFormatSpec.md`](FileFormatSpec.md), not a segment-local offset
+or a raw file
 EOF-relative offset. Destination validation happens before export
 boundary capture, so `invalidDestination` does not authorize removal.
 
@@ -300,7 +333,7 @@ the `ExportableLogStore` conformance. Removal is authorized only by
 the in-memory boundary captured by a prior successful byte-stable
 export.
 
-```swift
+```text
 extension FileLogStore: ExportableLogStore {
     public func removeExportedLogs() async throws(FileLogStoreRemoveError)
 }

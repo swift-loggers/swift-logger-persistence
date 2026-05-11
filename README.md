@@ -6,8 +6,13 @@ implementation.
 
 SwiftPM manifest, platform minima, and the `LoggerPersistence` core
 target ship with this repository. MIT licensed.
+Security reporting and supported release-line policy live in
+[`SECURITY.md`](SECURITY.md).
 
-> **API in active design.** This pre-1.0 package is not tagged yet.
+The `0.1.x` release line covers append/flush persistence, size-based
+rotation, byte-stable export, destructive removal of the exported prefix,
+and count-, byte-, and age-based retention. Replay/query APIs remain
+deferred.
 
 ## Products
 
@@ -21,63 +26,51 @@ The package shape exposes two products:
   [`Docs/FileFormatSpec.md`](Docs/FileFormatSpec.md); it is not part
   of the public API surface.
 - `LoggerFilePersistence` -- file-backed `FileLogStore`,
-  configuration, byte-stable export for parser-profile-accepted
-  recoverable data, and destructive removal for exported data covered
-  by accepted-prefix recovery rules. Removal is caller-invoked and
-  performs no autonomous background maintenance.
+  configuration, size-based rotation, byte-stable export for
+  parser-profile-accepted recoverable data, destructive removal for
+  exported data covered by accepted-prefix recovery rules, and
+  count-, byte-, and age-based retention. Removal is caller-invoked
+  and performs no autonomous background maintenance.
 
 ## Installation
 
 > **Requires Swift 6 toolchain** (the package manifest is
 > `swift-tools-version: 6.0` and the public API uses typed throws).
 
-> **Pre-tag.** This repository has no released SemVer tag yet, so a
-> `from:` (or `.upToNextMinor(from:)`) requirement has nothing to
-> resolve against. Until the first tag lands, depend on the branch
-> or a specific revision.
+Use the `0.1.x` patch line. The package is still pre-1.0, so the
+recommended requirement is up-to-next-minor instead of SwiftPM's
+default up-to-next-major `from:` shorthand:
 
-Pre-tag (current), pinned to a development branch:
-
-```swift
+```text
 .package(
-    url: "https://github.com/swift-loggers/swift-logger-persistence",
-    branch: "main"
+    url: "https://github.com/swift-loggers/swift-logger-persistence.git",
+    .upToNextMinor(from: "0.1.0")
 )
 ```
 
-or pinned to a specific commit:
+Add `LoggerPersistence` to targets that consume the envelope / store /
+encoder surface:
 
-```swift
-.package(
-    url: "https://github.com/swift-loggers/swift-logger-persistence",
-    revision: "<commit-sha>"
-)
-```
-
-After the first tag lands, switch to the released SemVer
-requirement and replace the placeholder below with the actual
-released tag (plain SemVer, no leading `v`):
-
-```swift
-// after the first release tag, replace `<first-release-version>`
-// with the actual tag (plain SemVer, no leading `v`):
-.package(
-    url: "https://github.com/swift-loggers/swift-logger-persistence",
-    from: "<first-release-version>"
-)
-```
-
-Then add the `LoggerPersistence` product to the targets that consume
-the envelope / store / encoder surface:
-
-```swift
+```text
 .product(name: "LoggerPersistence", package: "swift-logger-persistence")
 ```
 
 Targets that need the file-backed store add `LoggerFilePersistence`:
 
-```swift
+```text
 .product(name: "LoggerFilePersistence", package: "swift-logger-persistence")
+```
+
+Example target dependency list:
+
+```text
+.target(
+    name: "AppLogging",
+    dependencies: [
+        .product(name: "LoggerPersistence", package: "swift-logger-persistence"),
+        .product(name: "LoggerFilePersistence", package: "swift-logger-persistence")
+    ]
+)
 ```
 
 The package declares a SwiftPM dependency on
@@ -85,8 +78,7 @@ The package declares a SwiftPM dependency on
 for the `Loggers.LogRecord` shape; SwiftPM resolves it transitively
 through this package, so consumers do not install it separately.
 Platform minima follow the file-backed API surface (iOS 13.4 /
-tvOS 13.4 / macOS 10.15.4 / watchOS 6.2 / visionOS 1) so the
-manifest stays compatible across the milestone PR sequence.
+tvOS 13.4 / macOS 10.15.4 / watchOS 6.2 / visionOS 1).
 
 ## Usage model
 
@@ -105,9 +97,11 @@ and PII-free.
 `FileLogStore` accepts envelopes through the
 `PersistentLogStore` protocol and writes LF-terminated NDJSON lines
 under recoverable visibility semantics defined in
-[`Docs/FileFormatSpec.md`](Docs/FileFormatSpec.md). M3.3.x exposes
-write-only append/flush lifecycle APIs for this milestone series, with
-no query or replay API.
+[`Docs/FileFormatSpec.md`](Docs/FileFormatSpec.md). The `0.1.x`
+release line exposes write-only append/flush lifecycle APIs together
+with byte-stable export, destructive removal of the exported prefix,
+size-based rotation, and count-, byte-, and age-based retention;
+query and replay APIs remain deferred.
 
 README terminology uses `recoverable visibility semantics` for the
 persistence contract, `accepted-prefix recovery rules` for the
@@ -119,7 +113,7 @@ defined by
 
 > **Important:** The [file-format contract](Docs/FileFormatSpec.md), not
 > raw file size, is the source of recoverable visibility semantics.
-> FileFormatSpec.md also defines parser-profile acceptance for
+> [`Docs/FileFormatSpec.md`](Docs/FileFormatSpec.md) also defines parser-profile acceptance for
 > recoverable data. For parser-profile-accepted recoverable data,
 > parser-profile acceptance, canonical bytes, and accepted ordering
 > together define replay identity. This replay-identity invariant
@@ -146,6 +140,70 @@ append manifests), remote or SIEM shipping, or operating-system
 file-access enforcement must implement those layers outside this
 package.
 
+Minimal file-store setup:
+
+```swift
+import Foundation
+import LoggerFilePersistence
+import LoggerPersistence
+
+let directory = URL(fileURLWithPath: "/var/tmp/app-logs", isDirectory: true)
+let store = FileLogStore(configuration: .init(directory: directory))
+
+let envelope = try PersistentLogEnvelope(
+    id: UUID(),
+    sequence: 1,
+    createdAt: Date(),
+    contentType: "application/vnd.example.log+json",
+    hints: [:],
+    payload: Data(#"{"message":"hello"}"#.utf8)
+)
+
+try await store.append(envelope)
+try await store.flush()
+```
+
+When creating envelopes directly, the producer owns monotonic
+sequence assignment. `FileLogStore` preserves caller-provided
+sequence metadata and does not assign, reorder, or deduplicate it.
+
+Rotation and retention:
+
+```swift
+import Foundation
+import LoggerFilePersistence
+
+let directory = URL(fileURLWithPath: "/var/tmp/app-logs", isDirectory: true)
+let rotation = try RotationPolicy.bySize(maxSegmentBytes: 4 * 1024 * 1024)
+let retention = try RetentionPolicy.maxSegments(8)
+
+let store = FileLogStore(
+    configuration: .init(
+        directory: directory,
+        rotation: rotation,
+        retention: retention
+    )
+)
+```
+
+Byte-stable export and destructive removal:
+
+```swift
+import Foundation
+import LoggerFilePersistence
+
+let directory = URL(fileURLWithPath: "/var/tmp/app-logs", isDirectory: true)
+let store = FileLogStore(configuration: .init(directory: directory))
+let exportURL = directory.appendingPathComponent("export.ndjson")
+
+try await store.exportLogs(to: exportURL)
+try await store.removeExportedLogs()
+```
+
+`removeExportedLogs()` removes only the exported prefix captured by a
+successful `exportLogs(to:)`; bytes accepted after the export
+destination commit are preserved.
+
 ## Documentation
 
 - [`Docs/FileFormatSpec.md`](Docs/FileFormatSpec.md) -- normative
@@ -154,8 +212,8 @@ package.
   governance rules, byte-stable export for parser-profile-accepted
   recoverable data, and corruption conformance corpus contract.
   It is the normative source for persistence semantics and outranks
-  `APIDesign.md` for those rules, including byte-stable replay and
-  export compatibility.
+  [`Docs/APIDesign.md`](Docs/APIDesign.md) for those rules, including
+  byte-stable replay and export compatibility.
 - [`Docs/CorpusSpec.md`](Docs/CorpusSpec.md) -- detailed
   fixture plan for the conformance corpus.
 - [`Docs/APICompatibility.md`](Docs/APICompatibility.md) --
@@ -176,7 +234,8 @@ package.
 - [`Docs/ExportAndRemoveDesign.md`](Docs/ExportAndRemoveDesign.md) --
   implementation-oriented non-normative export/remove guidance for the
   current implementation. This document does not override
-  `FileFormatSpec.md` or `APIDesign.md` for the current milestone
+  [`Docs/FileFormatSpec.md`](Docs/FileFormatSpec.md) or
+  [`Docs/APIDesign.md`](Docs/APIDesign.md) for the current milestone
   series.
 - [`Docs/TestingGuidance.md`](Docs/TestingGuidance.md) --
   non-normative guidance for version-stable diagnostic assertions in
